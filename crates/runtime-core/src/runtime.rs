@@ -1,12 +1,16 @@
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, Mutex};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use inference_engine::{InferenceBackend, ModelConfig, Token};
-use memory_guard::{MemoryGuard, WatermarkGuard};
-use model_manager::{GenerationParams, InMemoryRegistry, ModelId, ModelMetadata, ModelRegistry};
+use memory_guard::{MemoryEvent, MemoryGuard, WatermarkGuard};
+use model_manager::{
+    evict_until_within_quota, GenerationParams, InMemoryRegistry, ModelId, ModelMetadata,
+    ModelRegistry,
+};
 
 use crate::config::RuntimeConfig;
 use crate::error::RuntimeError;
@@ -18,6 +22,7 @@ pub struct Runtime {
     loaded_model: Arc<Mutex<Option<ModelMetadata>>>,
     registry: InMemoryRegistry,
     memory_guard: WatermarkGuard,
+    monitor_task: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl Runtime {
@@ -31,6 +36,45 @@ impl Runtime {
         let registry = InMemoryRegistry::new(&config.models_dir)?;
         let memory_guard =
             WatermarkGuard::new(config.africa_mode, Some(config.memory_safety_margin_pct));
+        let engine = Arc::new(Mutex::new(backend));
+        let loaded_model = Arc::new(Mutex::new(None));
+        let monitor_task = if let Some(mut event_rx) = memory_guard.start_monitor(1000) {
+            let engine = engine.clone();
+            let loaded_model = loaded_model.clone();
+            let registry = registry.clone();
+            Some(tokio::spawn(async move {
+                while let Some(event) = event_rx.recv().await {
+                    match event {
+                        MemoryEvent::Critical { used_pct } => {
+                            warn!(
+                                used_pct = format!("{:.1}%", used_pct * 100.0),
+                                "Critical memory pressure detected"
+                            );
+                            if let Err(e) = handle_critical_memory_event(
+                                &engine,
+                                &loaded_model,
+                                &registry,
+                            )
+                            .await
+                            {
+                                warn!(error = %e, "Failed handling critical memory event");
+                            }
+                        }
+                        MemoryEvent::Warning { used_pct } => {
+                            warn!(
+                                used_pct = format!("{:.1}%", used_pct * 100.0),
+                                "Memory warning"
+                            );
+                        }
+                        MemoryEvent::Normal { used_pct } => {
+                            debug!(used_pct = format!("{:.1}%", used_pct * 100.0), "Memory normal");
+                        }
+                    }
+                }
+            }))
+        } else {
+            None
+        };
 
         info!(
             models_dir = %config.models_dir.display(),
@@ -40,10 +84,11 @@ impl Runtime {
 
         Ok(Self {
             config,
-            engine: Arc::new(Mutex::new(backend)),
-            loaded_model: Arc::new(Mutex::new(None)),
+            engine,
+            loaded_model,
             registry,
             memory_guard,
+            monitor_task: Mutex::new(monitor_task),
         })
     }
 
@@ -55,6 +100,8 @@ impl Runtime {
             .get(&id)
             .await?
             .ok_or_else(|| model_manager::ModelManagerError::NotFound(id.clone()))?;
+
+        self.enforce_storage_quota(std::slice::from_ref(&id)).await?;
 
         // Verify file exists
         if !metadata.path.exists() {
@@ -73,7 +120,7 @@ impl Runtime {
         // Load into engine
         let model_config = ModelConfig {
             path: metadata.path.clone(),
-            context_size: self.config.max_context_tokens.min(metadata.context_limit),
+            context_size: self.effective_context_size(metadata.context_limit),
             gpu_layers: None,
         };
 
@@ -100,7 +147,7 @@ impl Runtime {
 
         let model_config = ModelConfig {
             path: path.to_path_buf(),
-            context_size: self.config.max_context_tokens,
+            context_size: self.effective_context_size(self.config.max_context_tokens),
             gpu_layers: None,
         };
 
@@ -198,7 +245,288 @@ impl Runtime {
     /// Graceful shutdown.
     pub async fn shutdown(&self) -> Result<(), RuntimeError> {
         info!("Runtime shutting down");
+        self.memory_guard.stop_monitor();
+        if let Some(handle) = self.monitor_task.lock().await.take() {
+            let _ = handle.await;
+        }
         self.unload_model().await.ok(); // Best-effort unload
         Ok(())
+    }
+
+    fn effective_context_size(&self, model_limit: usize) -> usize {
+        let mut size = self.config.max_context_tokens.min(model_limit);
+        if self.config.africa_mode {
+            size = size.min(1024);
+        }
+        size
+    }
+
+    async fn enforce_storage_quota(&self, protected: &[ModelId]) -> Result<(), RuntimeError> {
+        let evicted =
+            evict_until_within_quota(&self.registry, self.config.max_storage_bytes, protected)
+                .await?;
+        if !evicted.is_empty() {
+            info!(count = evicted.len(), "Evicted models to satisfy storage quota");
+        }
+        Ok(())
+    }
+}
+
+async fn handle_critical_memory_event(
+    engine: &Arc<Mutex<Box<dyn InferenceBackend>>>,
+    loaded_model: &Arc<Mutex<Option<ModelMetadata>>>,
+    registry: &InMemoryRegistry,
+) -> Result<(), RuntimeError> {
+    let active_id = loaded_model.lock().await.as_ref().map(|m| m.id.clone());
+
+    if let Some(evicted_id) = evict_one_lru_non_active(registry, active_id.as_ref()).await? {
+        warn!(model = %evicted_id, "Evicted cold model due to memory pressure");
+    } else if active_id.is_some() {
+        warn!("No cold model available to evict; unloading active model");
+        let mut guard = engine.lock().await;
+        guard.unload_model().await?;
+        drop(guard);
+        *loaded_model.lock().await = None;
+    }
+
+    Ok(())
+}
+
+async fn evict_one_lru_non_active(
+    registry: &InMemoryRegistry,
+    active_model: Option<&ModelId>,
+) -> Result<Option<ModelId>, RuntimeError> {
+    let mut candidates = registry.list_all().await?;
+    candidates.sort_by_key(|m| m.last_used);
+
+    let Some(candidate) = candidates.into_iter().find(|m| {
+        active_model != Some(&m.id)
+    }) else {
+        return Ok(None);
+    };
+
+    let model_id = candidate.id.clone();
+    let path = registry.remove_with_file(&model_id).await?;
+    match tokio::fs::remove_file(&path).await {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(model_manager::ModelManagerError::EvictionFailed(format!(
+                "failed to delete {}: {e}",
+                path.display()
+            ))
+            .into());
+        }
+    }
+
+    Ok(Some(model_id))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use chrono::{Duration, Utc};
+    use inference_engine::{CompletionStats, InferenceError, ModelConfig};
+    use tokio::sync::mpsc;
+    use tokio::sync::Mutex;
+    use tokio_util::sync::CancellationToken;
+
+    use super::*;
+
+    struct RecordingBackend {
+        loaded: bool,
+        last_context_size: Arc<Mutex<Option<usize>>>,
+    }
+
+    impl RecordingBackend {
+        fn new(last_context_size: Arc<Mutex<Option<usize>>>) -> Self {
+            Self {
+                loaded: false,
+                last_context_size,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl InferenceBackend for RecordingBackend {
+        async fn load_model(
+            &mut self,
+            _path: &Path,
+            config: &ModelConfig,
+        ) -> Result<(), InferenceError> {
+            *self.last_context_size.lock().await = Some(config.context_size);
+            self.loaded = true;
+            Ok(())
+        }
+
+        async fn unload_model(&mut self) -> Result<(), InferenceError> {
+            self.loaded = false;
+            Ok(())
+        }
+
+        async fn stream_completion(
+            &self,
+            _prompt: &str,
+            _params: &GenerationParams,
+            _tx: mpsc::Sender<Token>,
+            _cancel: CancellationToken,
+        ) -> Result<CompletionStats, InferenceError> {
+            Ok(CompletionStats {
+                tokens_generated: 0,
+                tokens_per_second: 0.0,
+                prompt_tokens: 0,
+                total_duration_ms: 0,
+            })
+        }
+
+        fn memory_usage_bytes(&self) -> u64 {
+            0
+        }
+
+        fn is_loaded(&self) -> bool {
+            self.loaded
+        }
+    }
+
+    fn test_config(base: &Path) -> RuntimeConfig {
+        RuntimeConfig {
+            models_dir: base.join("models"),
+            cache_dir: base.join("cache"),
+            logs_dir: base.join("logs"),
+            max_storage_bytes: 10 * 1024 * 1024,
+            max_context_tokens: 4096,
+            memory_safety_margin_pct: 0.25,
+            inference_timeout_secs: 60,
+            africa_mode: false,
+        }
+    }
+
+    fn model_metadata(id: &str, path: PathBuf, size: u64, estimated_ram: u64, sha256: String, last_used: chrono::DateTime<Utc>) -> ModelMetadata {
+        ModelMetadata {
+            id: id.into(),
+            name: id.to_string(),
+            path,
+            quantization: model_manager::QuantType::Q4KM,
+            size_bytes: size,
+            estimated_ram_bytes: estimated_ram,
+            context_limit: 4096,
+            sha256,
+            last_used,
+            download_url: None,
+            license: "unknown".into(),
+            min_ram_bytes: 0,
+            tags: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn africa_mode_caps_context_to_1024() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut config = test_config(dir.path());
+        config.africa_mode = true;
+
+        let context_capture = Arc::new(Mutex::new(None));
+        let backend = Box::new(RecordingBackend::new(context_capture.clone()));
+        let runtime = Runtime::new(config, backend).await.unwrap();
+
+        let path = dir.path().join("model.gguf");
+        tokio::fs::write(&path, b"dummy").await.unwrap();
+        runtime.load_model_from_path(&path, "local").await.unwrap();
+
+        let captured = *context_capture.lock().await;
+        assert_eq!(captured, Some(1024));
+    }
+
+    #[tokio::test]
+    async fn load_model_refuses_oom_candidate() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = test_config(dir.path());
+        let backend = Box::new(RecordingBackend::new(Arc::new(Mutex::new(None))));
+        let runtime = Runtime::new(config, backend).await.unwrap();
+
+        let path = dir.path().join("oom.gguf");
+        tokio::fs::write(&path, b"dummy-model").await.unwrap();
+        let sha = model_manager::compute_sha256(&path).await.unwrap();
+        let size = std::fs::metadata(&path).unwrap().len();
+        let metadata = model_metadata(
+            "oom",
+            path,
+            size,
+            u64::MAX / 2,
+            sha,
+            Utc::now(),
+        );
+        runtime.registry().register(metadata).await.unwrap();
+
+        let err = runtime.load_model("oom").await.unwrap_err();
+        assert!(matches!(
+            err,
+            RuntimeError::Memory(memory_guard::MemoryError::InsufficientMemory { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn storage_quota_evicts_lru_before_load() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut config = test_config(dir.path());
+        config.max_storage_bytes = 18;
+
+        let backend = Box::new(RecordingBackend::new(Arc::new(Mutex::new(None))));
+        let runtime = Runtime::new(config, backend).await.unwrap();
+
+        let old_path = dir.path().join("old.gguf");
+        let new_path = dir.path().join("new.gguf");
+        tokio::fs::write(&old_path, vec![0u8; 12]).await.unwrap();
+        tokio::fs::write(&new_path, vec![1u8; 12]).await.unwrap();
+
+        let old_meta = model_metadata(
+            "old",
+            old_path.clone(),
+            12,
+            1,
+            "unused".into(),
+            Utc::now() - Duration::days(3),
+        );
+        let new_meta = model_metadata(
+            "new",
+            new_path.clone(),
+            12,
+            1,
+            model_manager::compute_sha256(&new_path).await.unwrap(),
+            Utc::now(),
+        );
+
+        runtime.registry().register(old_meta).await.unwrap();
+        runtime.registry().register(new_meta).await.unwrap();
+
+        let total = runtime.memory_guard().total_memory_bytes();
+        let free = runtime.memory_guard().free_memory_bytes();
+        let used_pct = if total > 0 {
+            (total - free) as f64 / total as f64
+        } else {
+            0.0
+        };
+        if used_pct > 0.90 {
+            eprintln!(
+                "Skipping quota eviction test due to critical host memory usage: {:.1}%",
+                used_pct * 100.0
+            );
+            return;
+        }
+
+        runtime.load_model("new").await.unwrap();
+
+        assert!(!old_path.exists());
+        assert!(
+            runtime
+                .registry()
+                .get(&ModelId::from("old"))
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }

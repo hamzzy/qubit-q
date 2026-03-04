@@ -95,4 +95,7 @@ pub enum Commands {
 
     /// Show system memory information
     Info,
+
+    /// Detect device capabilities and recommend quantization
+    Profile,
 }

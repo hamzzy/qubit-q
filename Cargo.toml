@@ -4,6 +4,7 @@ members = [
     "crates/memory-guard",
     "crates/inference-engine",
     "crates/runtime-core",
+    "crates/device-profiler",
     "crates/mai",
 ]
 resolver = "2"
@@ -29,3 +30,4 @@ model-manager = { path = "crates/model-manager" }
 memory-guard = { path = "crates/memory-guard" }
 inference-engine = { path = "crates/inference-engine", default-features = false }
 runtime-core = { path = "crates/runtime-core", default-features = false }
+device-profiler = { path = "crates/device-profiler" }

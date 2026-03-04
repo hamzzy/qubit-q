@@ -17,6 +17,7 @@ runtime-core = { workspace = true, default-features = false }
 model-manager = { workspace = true }
 inference-engine = { workspace = true, default-features = false }
 memory-guard = { workspace = true }
+device-profiler = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }

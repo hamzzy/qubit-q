@@ -20,3 +20,7 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
 dirs = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+tempfile = "3"

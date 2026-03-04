@@ -1,6 +1,8 @@
 use model_manager::ModelMetadata;
+use tokio::sync::mpsc;
 
 use crate::error::MemoryError;
+use crate::monitor::MemoryEvent;
 
 /// Trait for memory safety checks before loading models.
 pub trait MemoryGuard: Send + Sync {
@@ -13,9 +15,13 @@ pub trait MemoryGuard: Send + Sync {
     /// Total system memory in bytes.
     fn total_memory_bytes(&self) -> u64;
 
-    /// Force-trigger model eviction to free memory.
+    /// Request model eviction to free memory.
     fn request_eviction(&self) -> Result<(), MemoryError>;
 
     /// Start background memory monitoring loop.
-    fn start_monitor(&self, interval_ms: u64);
+    /// Returns a receiver for memory events, or None if not supported.
+    fn start_monitor(&self, interval_ms: u64) -> Option<mpsc::Receiver<MemoryEvent>>;
+
+    /// Stop background memory monitoring.
+    fn stop_monitor(&self);
 }

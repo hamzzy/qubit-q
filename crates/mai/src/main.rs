@@ -82,6 +82,9 @@ async fn main() -> Result<()> {
         Commands::Info => {
             cmd_info(config)?;
         }
+        Commands::Profile => {
+            cmd_profile(config)?;
+        }
     }
 
     Ok(())
@@ -275,6 +278,40 @@ fn cmd_info(config: RuntimeConfig) -> Result<()> {
         config.memory_safety_margin_pct * 100.0
     );
     println!("Max context:   {} tokens", config.max_context_tokens);
+
+    Ok(())
+}
+
+fn cmd_profile(config: RuntimeConfig) -> Result<()> {
+    let profile = device_profiler::SystemProfiler::detect()
+        .map_err(|e| anyhow::anyhow!("Failed to detect device profile: {e}"))?;
+    let recommended_quant = device_profiler::recommend_quantization(&profile);
+    let max_model_size = device_profiler::max_model_size_bytes(
+        &profile,
+        config.memory_safety_margin_pct,
+    );
+
+    println!("Device Profile");
+    println!("==============");
+    println!("Platform:      {}", profile.platform);
+    println!("CPU arch:      {}", profile.cpu_arch);
+    println!("CPU cores:     {}", profile.cpu_cores);
+    println!("GPU:           {}", profile.gpu_type);
+    println!("Total RAM:     {}", format_bytes(profile.total_ram_bytes));
+    println!("Free RAM:      {}", format_bytes(profile.free_ram_bytes));
+    println!(
+        "Storage free:  {}",
+        format_bytes(profile.available_storage_bytes)
+    );
+    println!();
+    println!("Recommendation");
+    println!("==============");
+    println!("Best quant:    {}", recommended_quant);
+    println!("Max model RAM: {}", format_bytes(max_model_size));
+    println!(
+        "Safety margin: {:.0}%",
+        config.memory_safety_margin_pct * 100.0
+    );
 
     Ok(())
 }

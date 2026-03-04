@@ -17,11 +17,14 @@ pub trait ModelRegistry: Send + Sync {
     async fn get(&self, id: &ModelId) -> Result<Option<ModelMetadata>, ModelManagerError>;
     async fn list_all(&self) -> Result<Vec<ModelMetadata>, ModelManagerError>;
     async fn remove(&self, id: &ModelId) -> Result<(), ModelManagerError>;
+    async fn remove_with_file(&self, id: &ModelId) -> Result<PathBuf, ModelManagerError>;
     async fn update_last_used(&self, id: &ModelId) -> Result<(), ModelManagerError>;
     async fn lru_candidate(&self) -> Result<Option<ModelId>, ModelManagerError>;
+    async fn total_storage_bytes(&self) -> Result<u64, ModelManagerError>;
 }
 
 /// In-memory registry backed by a JSON file on disk.
+#[derive(Clone)]
 pub struct InMemoryRegistry {
     models: Arc<RwLock<HashMap<ModelId, ModelMetadata>>>,
     registry_path: PathBuf,
@@ -98,6 +101,20 @@ impl ModelRegistry for InMemoryRegistry {
         Ok(())
     }
 
+    async fn remove_with_file(&self, id: &ModelId) -> Result<PathBuf, ModelManagerError> {
+        let path = {
+            let mut models = self.models.write().await;
+            let metadata = models
+                .remove(id)
+                .ok_or_else(|| ModelManagerError::NotFound(id.clone()))?;
+            metadata.path
+        };
+
+        self.persist().await?;
+        info!(%id, path = %path.display(), "Model removed from registry");
+        Ok(path)
+    }
+
     async fn update_last_used(&self, id: &ModelId) -> Result<(), ModelManagerError> {
         {
             let mut models = self.models.write().await;
@@ -118,6 +135,11 @@ impl ModelRegistry for InMemoryRegistry {
             .map(|m| m.id.clone());
         Ok(candidate)
     }
+
+    async fn total_storage_bytes(&self) -> Result<u64, ModelManagerError> {
+        let models = self.models.read().await;
+        Ok(models.values().map(|m| m.size_bytes).sum())
+    }
 }
 
 #[cfg(test)]
@@ -129,7 +151,7 @@ mod tests {
     #[tokio::test]
     async fn test_register_and_get() {
         let dir = TempDir::new().unwrap();
-        let registry = InMemoryRegistry::new(&dir.path().to_path_buf()).unwrap();
+        let registry = InMemoryRegistry::new(dir.path()).unwrap();
 
         let meta = dummy_metadata();
         registry.register(meta.clone()).await.unwrap();
@@ -142,7 +164,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_and_remove() {
         let dir = TempDir::new().unwrap();
-        let registry = InMemoryRegistry::new(&dir.path().to_path_buf()).unwrap();
+        let registry = InMemoryRegistry::new(dir.path()).unwrap();
 
         let meta = dummy_metadata();
         registry.register(meta.clone()).await.unwrap();

@@ -25,4 +25,10 @@ pub enum ModelManagerError {
 
     #[error("Registry error: {0}")]
     Registry(String),
+
+    #[error("Storage quota exceeded: current {current} bytes, limit {limit} bytes")]
+    StorageQuotaExceeded { current: u64, limit: u64 },
+
+    #[error("Eviction failed: {0}")]
+    EvictionFailed(String),
 }

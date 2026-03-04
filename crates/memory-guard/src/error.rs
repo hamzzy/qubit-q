@@ -10,6 +10,9 @@ pub enum MemoryError {
     #[error("System memory detection failed: {0}")]
     DetectionFailed(String),
 
-    #[error("Eviction not supported in this phase")]
-    EvictionNotSupported,
+    #[error("Eviction required but no candidates available")]
+    EvictionFailed,
+
+    #[error("Memory monitor error: {0}")]
+    MonitorError(String),
 }
