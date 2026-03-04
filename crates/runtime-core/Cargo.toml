@@ -1,0 +1,22 @@
+[package]
+name = "runtime-core"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+llama-backend = ["inference-engine/llama-backend"]
+mock-backend = ["inference-engine/mock-backend"]
+
+[dependencies]
+model-manager = { workspace = true }
+memory-guard = { workspace = true }
+inference-engine = { workspace = true, default-features = false }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+dirs = { workspace = true }

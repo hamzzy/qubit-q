@@ -1,0 +1,5 @@
+/target
+Cargo.lock
+*.gguf
+.DS_Store
+plan.md

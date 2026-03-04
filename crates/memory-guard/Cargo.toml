@@ -1,0 +1,13 @@
+[package]
+name = "memory-guard"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+model-manager = { workspace = true }
+sysinfo = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+chrono = { workspace = true }

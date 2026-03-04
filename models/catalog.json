@@ -1,0 +1,29 @@
+{
+  "version": "1.0",
+  "models": [
+    {
+      "id": "phi-3-mini-q4",
+      "name": "Phi-3 Mini (Q4_K_M)",
+      "download_url": "https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-gguf/resolve/main/Phi-3-mini-4k-instruct-q4.gguf",
+      "quantization": "Q4KM",
+      "size_bytes": 2393232384,
+      "estimated_ram_bytes": 2872000000,
+      "context_limit": 4096,
+      "license": "MIT",
+      "min_ram_bytes": 3221225472,
+      "tags": ["africa-optimized", "offline"]
+    },
+    {
+      "id": "tinyllama-1b-q4",
+      "name": "TinyLlama 1.1B (Q4_K_M)",
+      "download_url": "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf",
+      "quantization": "Q4KM",
+      "size_bytes": 669000000,
+      "estimated_ram_bytes": 1100000000,
+      "context_limit": 2048,
+      "license": "Apache-2.0",
+      "min_ram_bytes": 1610612736,
+      "tags": ["africa-optimized", "offline", "tiny"]
+    }
+  ]
+}

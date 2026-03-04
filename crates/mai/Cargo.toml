@@ -1,0 +1,26 @@
+[package]
+name = "mai"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "mai"
+path = "src/main.rs"
+
+[features]
+default = []
+llama-backend = ["runtime-core/llama-backend", "inference-engine/llama-backend"]
+mock-backend = ["runtime-core/mock-backend", "inference-engine/mock-backend"]
+
+[dependencies]
+runtime-core = { workspace = true, default-features = false }
+model-manager = { workspace = true }
+inference-engine = { workspace = true, default-features = false }
+memory-guard = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+anyhow = "1"
