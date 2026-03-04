@@ -5,6 +5,7 @@ use clap::Parser;
 use tokio::io::AsyncWriteExt;
 use tracing_subscriber::EnvFilter;
 
+use http_server::ServerConfig;
 use inference_engine::InferenceBackend;
 use memory_guard::MemoryGuard;
 use model_manager::{GenerationParams, ModelId, ModelMetadata, ModelRegistry, QuantType};
@@ -82,8 +83,17 @@ async fn main() -> Result<()> {
         Commands::Info => {
             cmd_info(config)?;
         }
-        Commands::Profile => {
-            cmd_profile(config)?;
+        Commands::Profile { benchmark_model } => {
+            cmd_profile(config, benchmark_model).await?;
+        }
+        Commands::Serve {
+            port,
+            lan,
+            api_key,
+            tls_cert,
+            tls_key,
+        } => {
+            cmd_serve(config, port, lan, api_key, tls_cert, tls_key).await?;
         }
     }
 
@@ -282,14 +292,12 @@ fn cmd_info(config: RuntimeConfig) -> Result<()> {
     Ok(())
 }
 
-fn cmd_profile(config: RuntimeConfig) -> Result<()> {
+async fn cmd_profile(config: RuntimeConfig, benchmark_model: Option<PathBuf>) -> Result<()> {
     let profile = device_profiler::SystemProfiler::detect()
         .map_err(|e| anyhow::anyhow!("Failed to detect device profile: {e}"))?;
     let recommended_quant = device_profiler::recommend_quantization(&profile);
-    let max_model_size = device_profiler::max_model_size_bytes(
-        &profile,
-        config.memory_safety_margin_pct,
-    );
+    let max_model_size =
+        device_profiler::max_model_size_bytes(&profile, config.memory_safety_margin_pct);
 
     println!("Device Profile");
     println!("==============");
@@ -313,25 +321,124 @@ fn cmd_profile(config: RuntimeConfig) -> Result<()> {
         config.memory_safety_margin_pct * 100.0
     );
 
+    if let Some(path) = benchmark_model {
+        println!();
+        println!("Benchmark");
+        println!("=========");
+        let result = device_profiler::benchmark_model_tokens_per_sec(&path)
+            .await
+            .map_err(|e| anyhow::anyhow!("Benchmark failed: {e}"))?;
+        println!("Model path:    {}", path.display());
+        println!("Tokens/sec:    {:.2}", result.tokens_per_sec);
+        println!("Cache hit:     {}", result.cache_hit);
+        println!("Measured at:   {}", result.measured_at.to_rfc3339());
+    }
+
     Ok(())
 }
 
+async fn cmd_serve(
+    runtime_config: RuntimeConfig,
+    port: u16,
+    lan: bool,
+    api_key: Option<String>,
+    tls_cert: Option<PathBuf>,
+    tls_key: Option<PathBuf>,
+) -> Result<()> {
+    if tls_cert.is_some() ^ tls_key.is_some() {
+        anyhow::bail!("TLS requires both --tls-cert and --tls-key");
+    }
+
+    let server_config = ServerConfig {
+        port,
+        lan_mode: lan,
+        api_key,
+        tls_cert_path: tls_cert,
+        tls_key_path: tls_key,
+        ..Default::default()
+    };
+
+    eprintln!(
+        "Starting HTTP server on {}:{} (lan_mode={}, tls={})",
+        if lan { "0.0.0.0" } else { "127.0.0.1" },
+        port,
+        lan,
+        server_config.tls_enabled()
+    );
+
+    http_server::run_server(server_config, runtime_config)
+        .await
+        .map_err(|e| anyhow::anyhow!("HTTP server failed: {e}"))
+}
+
 fn create_backend() -> Result<Box<dyn InferenceBackend>> {
+    let requested = std::env::var("MAI_BACKEND")
+        .ok()
+        .map(|v| v.trim().to_ascii_lowercase())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "auto".to_string());
+
+    match requested.as_str() {
+        "auto" => create_backend_auto(),
+        "mlx" => create_backend_mlx(),
+        "llama" => create_backend_llama(),
+        "mock" => create_backend_mock(),
+        other => {
+            anyhow::bail!("Unknown MAI_BACKEND='{other}'. Supported values: auto, mlx, llama, mock")
+        }
+    }
+}
+
+fn create_backend_auto() -> Result<Box<dyn InferenceBackend>> {
+    #[cfg(all(feature = "mlx-backend", target_os = "ios"))]
+    {
+        return create_backend_mlx();
+    }
+
     #[cfg(feature = "llama-backend")]
     {
-        let backend = inference_engine::llama_backend::LlamaBackendWrapper::new()?;
-        Ok(Box::new(backend))
+        return create_backend_llama();
     }
 
-    #[cfg(all(feature = "mock-backend", not(feature = "llama-backend")))]
+    #[cfg(feature = "mock-backend")]
     {
-        Ok(Box::new(inference_engine::mock_backend::MockBackend::new()))
+        return create_backend_mock();
     }
 
-    #[cfg(not(any(feature = "llama-backend", feature = "mock-backend")))]
-    {
-        anyhow::bail!("No inference backend enabled. Build with --features llama-backend or --features mock-backend")
-    }
+    anyhow::bail!(
+        "No inference backend enabled. Build with --features mock-backend|llama-backend|mlx-backend"
+    )
+}
+
+#[cfg(feature = "mlx-backend")]
+fn create_backend_mlx() -> Result<Box<dyn InferenceBackend>> {
+    Ok(Box::new(inference_engine::mlx_backend::MlxBackend::new()))
+}
+
+#[cfg(not(feature = "mlx-backend"))]
+fn create_backend_mlx() -> Result<Box<dyn InferenceBackend>> {
+    anyhow::bail!("MLX backend requested but this binary was built without 'mlx-backend'")
+}
+
+#[cfg(feature = "llama-backend")]
+fn create_backend_llama() -> Result<Box<dyn InferenceBackend>> {
+    let backend = inference_engine::llama_backend::LlamaBackendWrapper::new()?;
+    Ok(Box::new(backend))
+}
+
+#[cfg(not(feature = "llama-backend"))]
+fn create_backend_llama() -> Result<Box<dyn InferenceBackend>> {
+    anyhow::bail!("llama backend requested but this binary was built without 'llama-backend'")
+}
+
+#[cfg(feature = "mock-backend")]
+fn create_backend_mock() -> Result<Box<dyn InferenceBackend>> {
+    Ok(Box::new(inference_engine::mock_backend::MockBackend::new()))
+}
+
+#[cfg(not(feature = "mock-backend"))]
+fn create_backend_mock() -> Result<Box<dyn InferenceBackend>> {
+    anyhow::bail!("mock backend requested but this binary was built without 'mock-backend'")
 }
 
 fn format_bytes(bytes: u64) -> String {

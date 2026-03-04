@@ -123,11 +123,8 @@ impl MemoryGuard for WatermarkGuard {
     }
 
     fn start_monitor(&self, interval_ms: u64) -> Option<mpsc::Receiver<MemoryEvent>> {
-        let (monitor, rx) = MemoryMonitor::start(
-            interval_ms,
-            WARNING_WATERMARK_PCT,
-            CRITICAL_WATERMARK_PCT,
-        );
+        let (monitor, rx) =
+            MemoryMonitor::start(interval_ms, WARNING_WATERMARK_PCT, CRITICAL_WATERMARK_PCT);
         *self.monitor.lock().unwrap() = Some(monitor);
         Some(rx)
     }

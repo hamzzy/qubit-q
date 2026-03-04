@@ -9,8 +9,24 @@ path = "src/main.rs"
 
 [features]
 default = []
-llama-backend = ["runtime-core/llama-backend", "inference-engine/llama-backend"]
-mock-backend = ["runtime-core/mock-backend", "inference-engine/mock-backend"]
+llama-backend = [
+    "runtime-core/llama-backend",
+    "inference-engine/llama-backend",
+    "http-server/llama-backend",
+    "device-profiler/llama-backend",
+]
+mlx-backend = [
+    "runtime-core/mlx-backend",
+    "inference-engine/mlx-backend",
+    "http-server/mlx-backend",
+    "device-profiler/mlx-backend",
+]
+mock-backend = [
+    "runtime-core/mock-backend",
+    "inference-engine/mock-backend",
+    "http-server/mock-backend",
+    "device-profiler/mock-backend",
+]
 
 [dependencies]
 runtime-core = { workspace = true, default-features = false }
@@ -18,6 +34,7 @@ model-manager = { workspace = true }
 inference-engine = { workspace = true, default-features = false }
 memory-guard = { workspace = true }
 device-profiler = { workspace = true }
+http-server = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }

@@ -53,7 +53,12 @@ mod tests {
     use chrono::{Duration, Utc};
     use tempfile::TempDir;
 
-    fn metadata(id: &str, path: PathBuf, size_bytes: u64, last_used: chrono::DateTime<Utc>) -> ModelMetadata {
+    fn metadata(
+        id: &str,
+        path: PathBuf,
+        size_bytes: u64,
+        last_used: chrono::DateTime<Utc>,
+    ) -> ModelMetadata {
         ModelMetadata {
             id: id.into(),
             name: id.to_string(),
@@ -116,6 +121,9 @@ mod tests {
         let err = evict_until_within_quota(&registry, 1, &[ModelId::from("protected")])
             .await
             .unwrap_err();
-        assert!(matches!(err, ModelManagerError::StorageQuotaExceeded { .. }));
+        assert!(matches!(
+            err,
+            ModelManagerError::StorageQuotaExceeded { .. }
+        ));
     }
 }

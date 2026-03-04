@@ -6,12 +6,14 @@ edition = "2021"
 [features]
 default = []
 llama-backend = ["inference-engine/llama-backend"]
+mlx-backend = ["inference-engine/mlx-backend"]
 mock-backend = ["inference-engine/mock-backend"]
 
 [dependencies]
 model-manager = { workspace = true }
 memory-guard = { workspace = true }
 inference-engine = { workspace = true, default-features = false }
+device-profiler = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 serde = { workspace = true }

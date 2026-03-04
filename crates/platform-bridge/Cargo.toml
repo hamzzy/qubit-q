@@ -1,0 +1,41 @@
+[package]
+name = "platform-bridge"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+default = ["mock-backend"]
+llama-backend = [
+    "runtime-core/llama-backend",
+    "inference-engine/llama-backend",
+    "device-profiler/llama-backend",
+]
+mlx-backend = [
+    "runtime-core/mlx-backend",
+    "inference-engine/mlx-backend",
+    "device-profiler/mlx-backend",
+]
+mock-backend = [
+    "runtime-core/mock-backend",
+    "inference-engine/mock-backend",
+    "device-profiler/mock-backend",
+]
+
+[dependencies]
+runtime-core = { workspace = true, default-features = false }
+inference-engine = { workspace = true, default-features = false }
+model-manager = { workspace = true }
+device-profiler = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+reqwest = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

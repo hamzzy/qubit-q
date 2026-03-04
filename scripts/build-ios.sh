@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CRATE="platform-bridge"
+FEATURES="${FEATURES:-mock-backend}"
+TARGETS=(
+  "aarch64-apple-ios"
+  "aarch64-apple-ios-sim"
+  "x86_64-apple-ios"
+)
+
+HEADER_OUT="$ROOT_DIR/bindings/ios/MobileAIRuntime.h"
+MODULEMAP_OUT="$ROOT_DIR/bindings/ios/module.modulemap"
+XCFRAMEWORK_OUT="$ROOT_DIR/bindings/ios/MobileAIRuntime.xcframework"
+SIM_UNIVERSAL_DIR="$ROOT_DIR/target/ios-simulator-universal/release"
+SIM_UNIVERSAL_LIB="$SIM_UNIVERSAL_DIR/libplatform_bridge.a"
+DEVICE_LIB="$ROOT_DIR/target/aarch64-apple-ios/release/libplatform_bridge.a"
+SIM_SLICE_DIR="ios-arm64_x86_64-simulator"
+DEVICE_SLICE_DIR="ios-arm64"
+
+mkdir -p "$ROOT_DIR/bindings/ios"
+
+ensure_target() {
+  local target="$1"
+  if rustup target list --installed | grep -q "^${target}$"; then
+    return 0
+  fi
+
+  echo "Installing rust target: $target"
+  if ! rustup target add "$target"; then
+    echo "error: failed to install rust target '$target'." >&2
+    echo "Check network access, then run: rustup target add $target" >&2
+    exit 1
+  fi
+}
+
+for target in "${TARGETS[@]}"; do
+  ensure_target "$target"
+  cargo build \
+    --release \
+    --target "$target" \
+    -p "$CRATE" \
+    --no-default-features \
+    --features "$FEATURES"
+done
+
+if command -v cbindgen >/dev/null 2>&1; then
+  cbindgen \
+    --config "$ROOT_DIR/crates/platform-bridge/cbindgen.toml" \
+    --crate "$CRATE" \
+    --output "$HEADER_OUT"
+else
+  if [[ ! -f "$HEADER_OUT" ]]; then
+    echo "error: cbindgen is not installed and $HEADER_OUT does not exist" >&2
+    echo "install with: cargo install cbindgen" >&2
+    exit 1
+  fi
+  echo "reusing existing header: $HEADER_OUT"
+fi
+
+cat > "$MODULEMAP_OUT" <<'MMEOF'
+module MobileAIRuntimeFFI {
+  header "MobileAIRuntime.h"
+  export *
+}
+MMEOF
+
+mkdir -p "$SIM_UNIVERSAL_DIR"
+lipo -create \
+  "$ROOT_DIR/target/aarch64-apple-ios-sim/release/libplatform_bridge.a" \
+  "$ROOT_DIR/target/x86_64-apple-ios/release/libplatform_bridge.a" \
+  -output "$SIM_UNIVERSAL_LIB"
+
+copy_headers() {
+  local headers_dir="$1"
+  mkdir -p "$headers_dir"
+  cp "$HEADER_OUT" "$headers_dir/MobileAIRuntime.h"
+  cp "$MODULEMAP_OUT" "$headers_dir/module.modulemap"
+  if [[ -f "$ROOT_DIR/bindings/ios/MobileAIRuntime.swift" ]]; then
+    cp "$ROOT_DIR/bindings/ios/MobileAIRuntime.swift" "$headers_dir/MobileAIRuntime.swift"
+  fi
+  if [[ -f "$ROOT_DIR/bindings/ios/README.md" ]]; then
+    cp "$ROOT_DIR/bindings/ios/README.md" "$headers_dir/README.md"
+  fi
+}
+
+write_xcframework_plist() {
+  cat > "$XCFRAMEWORK_OUT/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>AvailableLibraries</key>
+  <array>
+    <dict>
+      <key>BinaryPath</key>
+      <string>libplatform_bridge.a</string>
+      <key>HeadersPath</key>
+      <string>Headers</string>
+      <key>LibraryIdentifier</key>
+      <string>$SIM_SLICE_DIR</string>
+      <key>LibraryPath</key>
+      <string>libplatform_bridge.a</string>
+      <key>SupportedArchitectures</key>
+      <array>
+        <string>arm64</string>
+        <string>x86_64</string>
+      </array>
+      <key>SupportedPlatform</key>
+      <string>ios</string>
+      <key>SupportedPlatformVariant</key>
+      <string>simulator</string>
+    </dict>
+    <dict>
+      <key>BinaryPath</key>
+      <string>libplatform_bridge.a</string>
+      <key>HeadersPath</key>
+      <string>Headers</string>
+      <key>LibraryIdentifier</key>
+      <string>$DEVICE_SLICE_DIR</string>
+      <key>LibraryPath</key>
+      <string>libplatform_bridge.a</string>
+      <key>SupportedArchitectures</key>
+      <array>
+        <string>arm64</string>
+      </array>
+      <key>SupportedPlatform</key>
+      <string>ios</string>
+    </dict>
+  </array>
+  <key>CFBundlePackageType</key>
+  <string>XFWK</string>
+  <key>XCFrameworkFormatVersion</key>
+  <string>1.0</string>
+</dict>
+</plist>
+PLIST
+}
+
+build_xcframework_manually() {
+  rm -rf "$XCFRAMEWORK_OUT"
+  mkdir -p "$XCFRAMEWORK_OUT/$SIM_SLICE_DIR" "$XCFRAMEWORK_OUT/$DEVICE_SLICE_DIR"
+  cp "$SIM_UNIVERSAL_LIB" "$XCFRAMEWORK_OUT/$SIM_SLICE_DIR/libplatform_bridge.a"
+  cp "$DEVICE_LIB" "$XCFRAMEWORK_OUT/$DEVICE_SLICE_DIR/libplatform_bridge.a"
+  copy_headers "$XCFRAMEWORK_OUT/$SIM_SLICE_DIR/Headers"
+  copy_headers "$XCFRAMEWORK_OUT/$DEVICE_SLICE_DIR/Headers"
+  write_xcframework_plist
+}
+
+validate_xcframework() {
+  [[ -f "$XCFRAMEWORK_OUT/Info.plist" ]] || return 1
+  [[ -f "$XCFRAMEWORK_OUT/$SIM_SLICE_DIR/libplatform_bridge.a" ]] || return 1
+  [[ -f "$XCFRAMEWORK_OUT/$DEVICE_SLICE_DIR/libplatform_bridge.a" ]] || return 1
+  return 0
+}
+
+rm -rf "$XCFRAMEWORK_OUT"
+if command -v xcodebuild >/dev/null 2>&1; then
+  if xcodebuild -create-xcframework \
+    -library "$DEVICE_LIB" \
+      -headers "$ROOT_DIR/bindings/ios" \
+    -library "$SIM_UNIVERSAL_LIB" \
+      -headers "$ROOT_DIR/bindings/ios" \
+    -output "$XCFRAMEWORK_OUT"; then
+    if ! validate_xcframework; then
+      echo "warning: xcodebuild produced incomplete xcframework; applying manual packaging fallback" >&2
+      build_xcframework_manually
+    fi
+  else
+    echo "warning: xcodebuild -create-xcframework failed; applying manual packaging fallback" >&2
+    build_xcframework_manually
+  fi
+else
+  echo "warning: xcodebuild not found; applying manual packaging fallback" >&2
+  build_xcframework_manually
+fi
+
+if ! validate_xcframework; then
+  echo "error: failed to create a valid xcframework at $XCFRAMEWORK_OUT" >&2
+  exit 1
+fi
+
+echo "Built $XCFRAMEWORK_OUT"
+if [[ -d "$ROOT_DIR/flutter/ios/Runner.xcodeproj" ]]; then
+  echo "Next step for Flutter iOS:"
+  echo "  scripts/flutter-link-ios.sh"
+fi

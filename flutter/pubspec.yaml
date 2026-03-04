@@ -1,0 +1,23 @@
+name: mai_flutter
+publish_to: none
+version: 0.1.0+1
+
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  ffi: ^2.1.2
+  flutter_riverpod: ^2.5.1
+  http: ^1.2.0
+  json_annotation: ^4.9.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.2
+  ffigen: ^14.0.1
+
+flutter:
+  uses-material-design: true

@@ -15,17 +15,21 @@ impl SystemProfiler {
         );
         system.refresh_memory();
 
-        let total_ram_bytes = simulated_total_ram().unwrap_or_else(|| system.total_memory());
+        let total_ram_bytes = simulated_total_ram().unwrap_or_else(|| {
+            platform_total_memory_bytes().unwrap_or_else(|| system.total_memory())
+        });
 
         let free_ram_bytes = if simulated_total_ram().is_some() {
             simulated_free_ram(total_ram_bytes, &system)
         } else {
-            let avail = system.available_memory();
-            if avail > 0 {
-                avail
-            } else {
-                system.free_memory()
-            }
+            platform_available_memory_bytes().unwrap_or_else(|| {
+                let avail = system.available_memory();
+                if avail > 0 {
+                    avail
+                } else {
+                    system.free_memory()
+                }
+            })
         };
 
         let cpu_cores = system.cpus().len() as u32;
@@ -68,6 +72,106 @@ impl SystemProfiler {
         );
 
         Ok(profile)
+    }
+}
+
+fn platform_total_memory_bytes() -> Option<u64> {
+    #[cfg(target_os = "android")]
+    {
+        return android_meminfo_bytes().map(|(total, _)| total);
+    }
+
+    #[cfg(target_os = "ios")]
+    {
+        return ios_total_memory_bytes();
+    }
+
+    #[allow(unreachable_code)]
+    None
+}
+
+fn platform_available_memory_bytes() -> Option<u64> {
+    #[cfg(target_os = "android")]
+    {
+        return android_meminfo_bytes().map(|(_, available)| available);
+    }
+
+    #[cfg(target_os = "ios")]
+    {
+        return ios_available_memory_bytes();
+    }
+
+    #[allow(unreachable_code)]
+    None
+}
+
+#[cfg(target_os = "android")]
+fn android_meminfo_bytes() -> Option<(u64, u64)> {
+    let data = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let total_kb = parse_meminfo_kb(&data, "MemTotal")?;
+    let available_kb =
+        parse_meminfo_kb(&data, "MemAvailable").or_else(|| parse_meminfo_kb(&data, "MemFree"))?;
+    Some((total_kb * 1024, available_kb * 1024))
+}
+
+#[cfg(target_os = "android")]
+fn parse_meminfo_kb(meminfo: &str, key: &str) -> Option<u64> {
+    meminfo.lines().find_map(|line| {
+        let (k, rest) = line.split_once(':')?;
+        if k != key {
+            return None;
+        }
+        rest.split_whitespace().next()?.parse::<u64>().ok()
+    })
+}
+
+#[cfg(target_os = "ios")]
+fn ios_total_memory_bytes() -> Option<u64> {
+    let mut memsize: u64 = 0;
+    let mut size = std::mem::size_of::<u64>();
+    let key = b"hw.memsize\0";
+    // SAFETY: `key` is NUL-terminated and output buffers are valid for writes.
+    let result = unsafe {
+        libc::sysctlbyname(
+            key.as_ptr().cast(),
+            (&mut memsize as *mut u64).cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if result == 0 {
+        Some(memsize)
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "ios")]
+#[allow(deprecated)]
+fn ios_available_memory_bytes() -> Option<u64> {
+    // SAFETY: mach host APIs are called with valid pointers and checked return codes.
+    unsafe {
+        let host = libc::mach_host_self();
+        let page_size = libc::vm_page_size as u64;
+
+        let mut vm_stat: libc::vm_statistics64 = std::mem::zeroed();
+        let mut count = (std::mem::size_of::<libc::vm_statistics64_data_t>()
+            / std::mem::size_of::<libc::integer_t>())
+            as libc::mach_msg_type_number_t;
+
+        let result = libc::host_statistics64(
+            host,
+            libc::HOST_VM_INFO64,
+            (&mut vm_stat as *mut libc::vm_statistics64).cast::<libc::integer_t>(),
+            &mut count,
+        );
+        if result != libc::KERN_SUCCESS {
+            return None;
+        }
+
+        let available_pages = vm_stat.free_count + vm_stat.inactive_count;
+        Some((available_pages as u64) * page_size)
     }
 }
 

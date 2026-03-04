@@ -86,13 +86,7 @@ impl MemoryMonitor {
             }
         });
 
-        (
-            Self {
-                cancel,
-                handle,
-            },
-            rx,
-        )
+        (Self { cancel, handle }, rx)
     }
 
     /// Stop the memory monitor.
@@ -135,11 +129,7 @@ mod tests {
         let (monitor, mut rx) = MemoryMonitor::start(50, 0.75, 0.90);
 
         // Should receive at least one event quickly
-        let event = tokio::time::timeout(
-            tokio::time::Duration::from_millis(200),
-            rx.recv(),
-        )
-        .await;
+        let event = tokio::time::timeout(tokio::time::Duration::from_millis(200), rx.recv()).await;
 
         assert!(event.is_ok());
         let event = event.unwrap();

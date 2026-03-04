@@ -5,6 +5,8 @@ members = [
     "crates/inference-engine",
     "crates/runtime-core",
     "crates/device-profiler",
+    "crates/platform-bridge",
+    "crates/http-server",
     "crates/mai",
 ]
 resolver = "2"
@@ -24,6 +26,12 @@ clap = { version = "4", features = ["derive"] }
 llama-cpp-2 = "0.1"
 sysinfo = "0.33"
 dirs = "6"
+axum = { version = "0.7", features = ["macros"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+tokio-stream = "0.1"
+tower-http = { version = "0.6", features = ["trace"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+libc = "0.2"
 
 # Internal crates
 model-manager = { path = "crates/model-manager" }
@@ -31,3 +39,5 @@ memory-guard = { path = "crates/memory-guard" }
 inference-engine = { path = "crates/inference-engine", default-features = false }
 runtime-core = { path = "crates/runtime-core", default-features = false }
 device-profiler = { path = "crates/device-profiler" }
+platform-bridge = { path = "crates/platform-bridge" }
+http-server = { path = "crates/http-server" }

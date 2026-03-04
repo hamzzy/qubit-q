@@ -97,5 +97,32 @@ pub enum Commands {
     Info,
 
     /// Detect device capabilities and recommend quantization
-    Profile,
+    Profile {
+        /// Optional model path to run tokens/sec benchmark
+        #[arg(long)]
+        benchmark_model: Option<PathBuf>,
+    },
+
+    /// Run OpenAI-compatible HTTP server
+    Serve {
+        /// Port to bind
+        #[arg(long, default_value = "11434")]
+        port: u16,
+
+        /// Bind on all interfaces (0.0.0.0) instead of localhost
+        #[arg(long)]
+        lan: bool,
+
+        /// Optional API key for Bearer auth
+        #[arg(long)]
+        api_key: Option<String>,
+
+        /// TLS certificate path (PEM). Requires --tls-key.
+        #[arg(long)]
+        tls_cert: Option<PathBuf>,
+
+        /// TLS private key path (PEM). Requires --tls-cert.
+        #[arg(long)]
+        tls_key: Option<PathBuf>,
+    },
 }

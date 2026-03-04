@@ -1,0 +1,33 @@
+[package]
+name = "http-server"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["mock-backend"]
+llama-backend = ["runtime-core/llama-backend", "inference-engine/llama-backend"]
+mlx-backend = ["runtime-core/mlx-backend", "inference-engine/mlx-backend"]
+mock-backend = ["runtime-core/mock-backend", "inference-engine/mock-backend"]
+
+[dependencies]
+runtime-core = { workspace = true, default-features = false }
+inference-engine = { workspace = true, default-features = false }
+model-manager = { workspace = true }
+memory-guard = { workspace = true }
+axum = { workspace = true }
+axum-server = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tokio-stream = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+tower-http = { workspace = true }
+
+[dev-dependencies]
+reqwest = { workspace = true }
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }

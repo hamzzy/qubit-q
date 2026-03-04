@@ -1,0 +1,4 @@
+module MobileAIRuntimeFFI {
+  header "MobileAIRuntime.h"
+  export *
+}

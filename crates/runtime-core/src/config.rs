@@ -6,6 +6,7 @@ use crate::error::RuntimeError;
 
 /// Configuration for the MAI runtime.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RuntimeConfig {
     pub models_dir: PathBuf,
     pub cache_dir: PathBuf,
@@ -15,6 +16,7 @@ pub struct RuntimeConfig {
     pub memory_safety_margin_pct: f32,
     pub inference_timeout_secs: u64,
     pub africa_mode: bool,
+    pub auto_select_quantization: bool,
 }
 
 impl Default for RuntimeConfig {
@@ -30,6 +32,7 @@ impl Default for RuntimeConfig {
             memory_safety_margin_pct: 0.25,
             inference_timeout_secs: 300,
             africa_mode: false,
+            auto_select_quantization: true,
         }
     }
 }

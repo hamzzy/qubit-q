@@ -3,11 +3,23 @@ name = "device-profiler"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+llama-backend = ["inference-engine/llama-backend"]
+mlx-backend = ["inference-engine/mlx-backend"]
+mock-backend = ["inference-engine/mock-backend"]
+
 [dependencies]
 model-manager = { workspace = true }
+inference-engine = { workspace = true, default-features = false }
 sysinfo = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+libc = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+chrono = { workspace = true }
+dirs = { workspace = true }

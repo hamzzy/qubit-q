@@ -1,0 +1,3 @@
+// Force-link Rust C ABI symbols so Dart FFI can resolve them via DynamicLibrary.process().
+OTHER_LDFLAGS[sdk=iphonesimulator*]=$(inherited) -force_load $(SRCROOT)/Runner/Frameworks/MobileAIRuntime.xcframework/ios-arm64_x86_64-simulator/libplatform_bridge.a
+OTHER_LDFLAGS[sdk=iphoneos*]=$(inherited) -force_load $(SRCROOT)/Runner/Frameworks/MobileAIRuntime.xcframework/ios-arm64/libplatform_bridge.a

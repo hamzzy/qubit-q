@@ -31,4 +31,10 @@ pub enum ModelManagerError {
 
     #[error("Eviction failed: {0}")]
     EvictionFailed(String),
+
+    #[error("Download failed: {0}")]
+    DownloadFailed(String),
+
+    #[error("Download cancelled")]
+    DownloadCancelled,
 }

@@ -1,5 +1,53 @@
-/target
-Cargo.lock
+# ------------------------------
+# Rust / Cargo
+# ------------------------------
+/target/
+**/*.rs.bk
+
+# ------------------------------
+# Flutter / Dart
+# ------------------------------
+flutter/.dart_tool/
+flutter/.flutter-plugins
+flutter/.flutter-plugins-dependencies
+flutter/.packages
+flutter/.pub/
+flutter/build/
+
+# Generated platform artifacts
+flutter/android/.gradle/
+flutter/android/local.properties
+flutter/ios/Flutter/ephemeral/
+flutter/ios/Pods/
+flutter/macos/Flutter/ephemeral/
+
+# ------------------------------
+# Build outputs / artifacts
+# ------------------------------
+/build/
+/dist/
+*.a
+*.so
+*.dylib
+*.xcarchive
+*.ipa
+
+# Model assets
 *.gguf
+
+# Logs / temp
+*.log
+*.tmp
+*.swp
+
+# ------------------------------
+# OS / IDE
+# ------------------------------
 .DS_Store
+.xcode/
+.idea/
+*.iml
+.vscode/
+
+# Local docs/plans
 plan.md

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use device_profiler::{recommend_quantization, SystemProfiler};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -11,6 +12,8 @@ use model_manager::{
     evict_until_within_quota, GenerationParams, InMemoryRegistry, ModelId, ModelMetadata,
     ModelRegistry,
 };
+
+const STREAM_ERROR_PREFIX: &str = "__MAI_ERROR__:";
 
 use crate::config::RuntimeConfig;
 use crate::error::RuntimeError;
@@ -50,12 +53,9 @@ impl Runtime {
                                 used_pct = format!("{:.1}%", used_pct * 100.0),
                                 "Critical memory pressure detected"
                             );
-                            if let Err(e) = handle_critical_memory_event(
-                                &engine,
-                                &loaded_model,
-                                &registry,
-                            )
-                            .await
+                            if let Err(e) =
+                                handle_critical_memory_event(&engine, &loaded_model, &registry)
+                                    .await
                             {
                                 warn!(error = %e, "Failed handling critical memory event");
                             }
@@ -67,7 +67,10 @@ impl Runtime {
                             );
                         }
                         MemoryEvent::Normal { used_pct } => {
-                            debug!(used_pct = format!("{:.1}%", used_pct * 100.0), "Memory normal");
+                            debug!(
+                                used_pct = format!("{:.1}%", used_pct * 100.0),
+                                "Memory normal"
+                            );
                         }
                     }
                 }
@@ -94,14 +97,16 @@ impl Runtime {
 
     /// Load a model by ID from the registry.
     pub async fn load_model(&self, model_id: &str) -> Result<(), RuntimeError> {
-        let id = ModelId::from(model_id);
+        let requested_id = ModelId::from(model_id);
+        let id = self.select_model_for_device(&requested_id).await?;
         let metadata = self
             .registry
             .get(&id)
             .await?
             .ok_or_else(|| model_manager::ModelManagerError::NotFound(id.clone()))?;
 
-        self.enforce_storage_quota(std::slice::from_ref(&id)).await?;
+        self.enforce_storage_quota(std::slice::from_ref(&id))
+            .await?;
 
         // Verify file exists
         if !metadata.path.exists() {
@@ -131,7 +136,7 @@ impl Runtime {
         *self.loaded_model.lock().await = Some(metadata);
         self.registry.update_last_used(&id).await?;
 
-        info!(model = %id, "Model loaded and ready");
+        info!(model = %id, requested_model = %requested_id, "Model loaded and ready");
         Ok(())
     }
 
@@ -194,6 +199,7 @@ impl Runtime {
         let cancel_clone = cancel.clone();
 
         tokio::spawn(async move {
+            let tx_error = tx.clone();
             let engine = engine.lock().await;
             match engine
                 .stream_completion(&prompt, &params, tx, cancel_clone)
@@ -211,6 +217,13 @@ impl Runtime {
                 }
                 Err(e) => {
                     warn!(error = %e, "Inference error");
+                    let _ = tx_error
+                        .send(Token {
+                            text: format!("{STREAM_ERROR_PREFIX}{e}"),
+                            id: 0,
+                            logprob: None,
+                        })
+                        .await;
                 }
             }
         });
@@ -266,10 +279,133 @@ impl Runtime {
             evict_until_within_quota(&self.registry, self.config.max_storage_bytes, protected)
                 .await?;
         if !evicted.is_empty() {
-            info!(count = evicted.len(), "Evicted models to satisfy storage quota");
+            info!(
+                count = evicted.len(),
+                "Evicted models to satisfy storage quota"
+            );
         }
         Ok(())
     }
+
+    async fn select_model_for_device(
+        &self,
+        requested_id: &ModelId,
+    ) -> Result<ModelId, RuntimeError> {
+        if !self.config.auto_select_quantization {
+            return Ok(requested_id.clone());
+        }
+
+        let Some(requested_meta) = self.registry.get(requested_id).await? else {
+            return Ok(requested_id.clone());
+        };
+
+        let profile = match SystemProfiler::detect() {
+            Ok(profile) => profile,
+            Err(e) => {
+                debug!(
+                    error = %e,
+                    model = %requested_id,
+                    "Device profile detection failed; skipping auto quant selection"
+                );
+                return Ok(requested_id.clone());
+            }
+        };
+
+        let recommended = recommend_quantization(&profile);
+        if requested_meta.quantization.bits_per_weight() <= recommended.bits_per_weight() {
+            return Ok(requested_id.clone());
+        }
+
+        let family = model_family_key(&requested_meta.id.0);
+        let mut candidates: Vec<ModelMetadata> = self
+            .registry
+            .list_all()
+            .await?
+            .into_iter()
+            .filter(|m| {
+                model_family_key(&m.id.0) == family
+                    && m.quantization.bits_per_weight() <= recommended.bits_per_weight()
+            })
+            .collect();
+
+        candidates.sort_by(|a, b| {
+            let qa = a.quantization.bits_per_weight();
+            let qb = b.quantization.bits_per_weight();
+            qa.partial_cmp(&qb)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.last_used.cmp(&b.last_used))
+        });
+
+        let Some(selected) = candidates.pop() else {
+            return Ok(requested_id.clone());
+        };
+
+        if selected.id != *requested_id {
+            info!(
+                requested = %requested_id,
+                selected = %selected.id,
+                recommended_quant = %recommended,
+                "Auto-selected quantized model variant for this device"
+            );
+        }
+
+        Ok(selected.id)
+    }
+}
+
+fn model_family_key(model_id: &str) -> String {
+    let parts: Vec<String> = model_id
+        .split(['-', '_', '.'])
+        .filter(|p| !p.is_empty())
+        .map(|p| p.to_ascii_lowercase())
+        .collect();
+
+    let mut out = Vec::with_capacity(parts.len());
+    let mut idx = 0usize;
+    while idx < parts.len() {
+        if is_quant_token(&parts[idx]) {
+            idx += 1;
+            continue;
+        }
+
+        // Handles split quant forms like `q4_k_m` / `q5_k_s`.
+        if parts[idx].starts_with('q')
+            && parts[idx].len() == 2
+            && parts
+                .get(idx + 1)
+                .is_some_and(|next| next == "k" || next == "0")
+        {
+            idx += 2;
+            if parts
+                .get(idx)
+                .is_some_and(|suffix| suffix == "m" || suffix == "s")
+            {
+                idx += 1;
+            }
+            continue;
+        }
+
+        out.push(parts[idx].clone());
+        idx += 1;
+    }
+
+    out.join("-")
+}
+
+fn is_quant_token(token: &str) -> bool {
+    let normalized = token
+        .to_ascii_lowercase()
+        .replace(['-', '_'], "")
+        .replace("gguf", "");
+
+    if normalized.is_empty() {
+        return true;
+    }
+
+    matches!(
+        normalized.as_str(),
+        "q2k" | "q3ks" | "q3km" | "q4km" | "q4ks" | "q5km" | "q5ks" | "q6k" | "q80" | "f16"
+    )
 }
 
 async fn handle_critical_memory_event(
@@ -299,9 +435,7 @@ async fn evict_one_lru_non_active(
     let mut candidates = registry.list_all().await?;
     candidates.sort_by_key(|m| m.last_used);
 
-    let Some(candidate) = candidates.into_iter().find(|m| {
-        active_model != Some(&m.id)
-    }) else {
+    let Some(candidate) = candidates.into_iter().find(|m| active_model != Some(&m.id)) else {
         return Ok(None);
     };
 
@@ -339,13 +473,18 @@ mod tests {
     struct RecordingBackend {
         loaded: bool,
         last_context_size: Arc<Mutex<Option<usize>>>,
+        last_loaded_path: Arc<Mutex<Option<PathBuf>>>,
     }
 
     impl RecordingBackend {
-        fn new(last_context_size: Arc<Mutex<Option<usize>>>) -> Self {
+        fn new(
+            last_context_size: Arc<Mutex<Option<usize>>>,
+            last_loaded_path: Arc<Mutex<Option<PathBuf>>>,
+        ) -> Self {
             Self {
                 loaded: false,
                 last_context_size,
+                last_loaded_path,
             }
         }
     }
@@ -354,10 +493,11 @@ mod tests {
     impl InferenceBackend for RecordingBackend {
         async fn load_model(
             &mut self,
-            _path: &Path,
+            path: &Path,
             config: &ModelConfig,
         ) -> Result<(), InferenceError> {
             *self.last_context_size.lock().await = Some(config.context_size);
+            *self.last_loaded_path.lock().await = Some(path.to_path_buf());
             self.loaded = true;
             Ok(())
         }
@@ -401,10 +541,18 @@ mod tests {
             memory_safety_margin_pct: 0.25,
             inference_timeout_secs: 60,
             africa_mode: false,
+            auto_select_quantization: false,
         }
     }
 
-    fn model_metadata(id: &str, path: PathBuf, size: u64, estimated_ram: u64, sha256: String, last_used: chrono::DateTime<Utc>) -> ModelMetadata {
+    fn model_metadata(
+        id: &str,
+        path: PathBuf,
+        size: u64,
+        estimated_ram: u64,
+        sha256: String,
+        last_used: chrono::DateTime<Utc>,
+    ) -> ModelMetadata {
         ModelMetadata {
             id: id.into(),
             name: id.to_string(),
@@ -429,7 +577,8 @@ mod tests {
         config.africa_mode = true;
 
         let context_capture = Arc::new(Mutex::new(None));
-        let backend = Box::new(RecordingBackend::new(context_capture.clone()));
+        let path_capture = Arc::new(Mutex::new(None));
+        let backend = Box::new(RecordingBackend::new(context_capture.clone(), path_capture));
         let runtime = Runtime::new(config, backend).await.unwrap();
 
         let path = dir.path().join("model.gguf");
@@ -444,21 +593,17 @@ mod tests {
     async fn load_model_refuses_oom_candidate() {
         let dir = tempfile::TempDir::new().unwrap();
         let config = test_config(dir.path());
-        let backend = Box::new(RecordingBackend::new(Arc::new(Mutex::new(None))));
+        let backend = Box::new(RecordingBackend::new(
+            Arc::new(Mutex::new(None)),
+            Arc::new(Mutex::new(None)),
+        ));
         let runtime = Runtime::new(config, backend).await.unwrap();
 
         let path = dir.path().join("oom.gguf");
         tokio::fs::write(&path, b"dummy-model").await.unwrap();
         let sha = model_manager::compute_sha256(&path).await.unwrap();
         let size = std::fs::metadata(&path).unwrap().len();
-        let metadata = model_metadata(
-            "oom",
-            path,
-            size,
-            u64::MAX / 2,
-            sha,
-            Utc::now(),
-        );
+        let metadata = model_metadata("oom", path, size, u64::MAX / 2, sha, Utc::now());
         runtime.registry().register(metadata).await.unwrap();
 
         let err = runtime.load_model("oom").await.unwrap_err();
@@ -474,7 +619,10 @@ mod tests {
         let mut config = test_config(dir.path());
         config.max_storage_bytes = 18;
 
-        let backend = Box::new(RecordingBackend::new(Arc::new(Mutex::new(None))));
+        let backend = Box::new(RecordingBackend::new(
+            Arc::new(Mutex::new(None)),
+            Arc::new(Mutex::new(None)),
+        ));
         let runtime = Runtime::new(config, backend).await.unwrap();
 
         let old_path = dir.path().join("old.gguf");
@@ -520,13 +668,75 @@ mod tests {
         runtime.load_model("new").await.unwrap();
 
         assert!(!old_path.exists());
-        assert!(
-            runtime
-                .registry()
-                .get(&ModelId::from("old"))
-                .await
-                .unwrap()
-                .is_none()
+        assert!(runtime
+            .registry()
+            .get(&ModelId::from("old"))
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn auto_selects_lighter_quant_variant() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut config = test_config(dir.path());
+        config.auto_select_quantization = true;
+
+        let context_capture = Arc::new(Mutex::new(None));
+        let path_capture = Arc::new(Mutex::new(None));
+        let backend = Box::new(RecordingBackend::new(context_capture, path_capture.clone()));
+        let runtime = Runtime::new(config, backend).await.unwrap();
+
+        let f16_path = dir.path().join("phi3-f16.gguf");
+        let q4_path = dir.path().join("phi3-q4.gguf");
+        tokio::fs::write(&f16_path, b"f16").await.unwrap();
+        tokio::fs::write(&q4_path, b"q4").await.unwrap();
+
+        let f16_meta = model_metadata(
+            "phi3-f16",
+            f16_path.clone(),
+            3,
+            3,
+            model_manager::compute_sha256(&f16_path).await.unwrap(),
+            Utc::now() - Duration::hours(3),
         );
+        let q4_meta = model_metadata(
+            "phi3-q4km",
+            q4_path.clone(),
+            2,
+            2,
+            model_manager::compute_sha256(&q4_path).await.unwrap(),
+            Utc::now() - Duration::hours(1),
+        );
+
+        runtime.registry().register(f16_meta).await.unwrap();
+        runtime.registry().register(q4_meta).await.unwrap();
+
+        let total = runtime.memory_guard().total_memory_bytes();
+        let free = runtime.memory_guard().free_memory_bytes();
+        let used_pct = if total > 0 {
+            (total - free) as f64 / total as f64
+        } else {
+            0.0
+        };
+        if free == 0 || used_pct > 0.90 {
+            eprintln!(
+                "Skipping auto-select test due to host memory constraints: free={} used={:.1}%",
+                free,
+                used_pct * 100.0
+            );
+            return;
+        }
+
+        runtime.load_model("phi3-f16").await.unwrap();
+
+        let loaded = path_capture.lock().await.clone();
+        assert_eq!(loaded, Some(q4_path));
+    }
+
+    #[test]
+    fn strips_quant_tokens_from_family_key() {
+        assert_eq!(model_family_key("phi-3-mini-q4_k_m"), "phi-3-mini");
+        assert_eq!(model_family_key("tinyllama-q6k.gguf"), "tinyllama");
     }
 }

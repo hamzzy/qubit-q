@@ -1,0 +1,16 @@
+name: MaiBindingsGenerated
+output: lib/src/ffi/mai_bindings_generated.dart
+headers:
+  entry-points:
+    - ../bindings/ios/MobileAIRuntime.h
+
+functions:
+  include:
+    - mai_.*
+
+structs:
+  include:
+    - RuntimeHandle
+
+comments:
+  style: any
