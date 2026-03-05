@@ -164,6 +164,10 @@ class _ChatPageState extends ConsumerState<ChatPage> {
     final runtime = ref.read(runtimeControllerProvider);
     final promptCtrl = TextEditingController(text: runtime.systemPrompt);
     double temperature = runtime.temperature;
+    double topP = runtime.topP;
+    double topK = runtime.topK.toDouble();
+    double repeatPenalty = runtime.repeatPenalty;
+    double maxOutputTokens = runtime.maxOutputTokens.toDouble();
     double contextTokens = runtime.contextWindow.toDouble();
     bool preferAccelerator = runtime.preferAccelerator;
     bool thermalGuard = runtime.thermalGuardEnabled;
@@ -244,6 +248,54 @@ class _ChatPageState extends ConsumerState<ChatPage> {
                         ),
                         const SizedBox(height: 16),
                         _SliderRow(
+                          label: 'Top P',
+                          value: topP,
+                          min: 0.1,
+                          max: 1.0,
+                          leftHint: 'Focused',
+                          rightHint: 'Diverse',
+                          format: (v) => v.toStringAsFixed(2),
+                          onChanged: (v) => setSheetState(() => topP = v),
+                        ),
+                        const SizedBox(height: 16),
+                        _SliderRow(
+                          label: 'Top K',
+                          value: topK,
+                          min: 1,
+                          max: 200,
+                          divisions: 199,
+                          leftHint: '1',
+                          rightHint: '200',
+                          format: (v) => '${v.toInt()}',
+                          onChanged: (v) => setSheetState(() => topK = v),
+                        ),
+                        const SizedBox(height: 16),
+                        _SliderRow(
+                          label: 'Repeat Penalty',
+                          value: repeatPenalty,
+                          min: 1.0,
+                          max: 2.0,
+                          leftHint: 'Loose',
+                          rightHint: 'Strict',
+                          format: (v) => v.toStringAsFixed(2),
+                          onChanged: (v) =>
+                              setSheetState(() => repeatPenalty = v),
+                        ),
+                        const SizedBox(height: 16),
+                        _SliderRow(
+                          label: 'Max Output Tokens',
+                          value: maxOutputTokens,
+                          min: 32,
+                          max: 2048,
+                          divisions: 63,
+                          leftHint: '32',
+                          rightHint: '2048',
+                          format: (v) => '${v.toInt()}',
+                          onChanged: (v) =>
+                              setSheetState(() => maxOutputTokens = v),
+                        ),
+                        const SizedBox(height: 16),
+                        _SliderRow(
                           label: 'Context Window',
                           value: contextTokens,
                           min: 512,
@@ -291,6 +343,11 @@ class _ChatPageState extends ConsumerState<ChatPage> {
                             onPressed: () {
                               runtime.setSystemPrompt(promptCtrl.text);
                               runtime.setTemperature(temperature);
+                              runtime.setTopP(topP);
+                              runtime.setTopK(topK.toInt());
+                              runtime.setRepeatPenalty(repeatPenalty);
+                              runtime
+                                  .setMaxOutputTokens(maxOutputTokens.toInt());
                               runtime.setContextWindow(contextTokens.toInt());
                               runtime.setPreferAccelerator(preferAccelerator);
                               runtime.setThermalGuardEnabled(thermalGuard);
@@ -525,7 +582,7 @@ class _WelcomeView extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 14),
-            Row(
+            const Row(
               children: [
                 Expanded(
                   child: _WelcomeCard(
@@ -534,7 +591,7 @@ class _WelcomeView extends StatelessWidget {
                     badge: 'NORMAL',
                   ),
                 ),
-                const SizedBox(width: 10),
+                SizedBox(width: 10),
                 Expanded(
                   child: _WelcomeCard(
                     title: 'Creative',
@@ -545,7 +602,7 @@ class _WelcomeView extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 10),
-            Row(
+            const Row(
               children: [
                 Expanded(
                   child: _WelcomeCard(
@@ -554,7 +611,7 @@ class _WelcomeView extends StatelessWidget {
                     badge: 'NORMAL',
                   ),
                 ),
-                const SizedBox(width: 10),
+                SizedBox(width: 10),
                 Expanded(
                   child: _WelcomeCard(
                     title: 'Mentor',
@@ -759,7 +816,7 @@ class _MessageBubble extends StatelessWidget {
                 ? const _TypingIndicator()
                 : Text(
                     displayText,
-                    style: TextStyle(
+                    style: const TextStyle(
                       color: Colors.white,
                       height: 1.4,
                       fontSize: 14.5,

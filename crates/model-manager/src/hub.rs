@@ -43,6 +43,8 @@ pub struct HubModelFile {
     pub size_bytes: Option<u64>,
     pub download_url: String,
     pub quantization: Option<String>,
+    /// "llama" for GGUF files, "mlx" for MLX safetensors repos.
+    pub backend: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -204,6 +206,7 @@ fn map_hf_model_summary(raw: HuggingFaceModelApi) -> Option<HubModelSummary> {
             quantization: infer_quantization_from_filename(&s.rfilename),
             filename: s.rfilename,
             size_bytes: s.size,
+            backend: "llama".to_string(),
         })
         .collect::<Vec<_>>();
 

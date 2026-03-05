@@ -7,7 +7,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use chrono::{DateTime, Utc};
 use device_profiler::SystemProfiler;
-use inference_engine::InferenceBackend;
 use model_manager::{GenerationParams, ModelRegistry, QuantType};
 use reqwest::Url;
 use runtime_core::{Runtime, RuntimeConfig};
@@ -22,7 +21,6 @@ const ERR_RUNTIME: c_int = -3;
 const ERR_NOT_FOUND: c_int = -4;
 const EMBEDDED_CATALOG_JSON: &str = include_str!("../../../models/catalog.json");
 const HF_MODELS_API: &str = "https://huggingface.co/api/models";
-const BACKEND_AUTO: &str = "auto";
 static LAST_ERROR: OnceLock<Mutex<String>> = OnceLock::new();
 
 fn last_error_cell() -> &'static Mutex<String> {
@@ -58,6 +56,8 @@ fn get_last_error_message() -> Option<String> {
 
 /// Token callback type: called for each generated token.
 /// A final call with `token = NULL` marks stream completion.
+/// Non-null pointers are owned by the caller and must be released with
+/// `mai_free_string` after consumption.
 pub type TokenCallback = extern "C" fn(token: *const c_char, user_data: *mut c_void);
 
 #[derive(Debug, Default)]
@@ -121,6 +121,76 @@ struct DownloadRequest {
     name: String,
     #[serde(default)]
     quant: String,
+    #[serde(default)]
+    backend: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+struct CompletionParamsRequest {
+    max_tokens: Option<usize>,
+    temperature: Option<f32>,
+    top_p: Option<f32>,
+    top_k: Option<u32>,
+    repeat_penalty: Option<f32>,
+    stop_sequences: Option<Vec<String>>,
+    seed: Option<u64>,
+    stream: Option<bool>,
+}
+
+impl CompletionParamsRequest {
+    fn into_generation_params(self) -> Result<GenerationParams, String> {
+        let mut params = GenerationParams::default();
+
+        if let Some(max_tokens) = self.max_tokens {
+            if max_tokens == 0 {
+                return Err("max_tokens must be greater than 0".to_string());
+            }
+            params.max_tokens = max_tokens;
+        }
+
+        if let Some(temperature) = self.temperature {
+            if !temperature.is_finite() || temperature < 0.0 {
+                return Err("temperature must be a finite number >= 0".to_string());
+            }
+            params.temperature = temperature;
+        }
+
+        if let Some(top_p) = self.top_p {
+            if !top_p.is_finite() || top_p <= 0.0 || top_p > 1.0 {
+                return Err("top_p must be in (0, 1]".to_string());
+            }
+            params.top_p = top_p;
+        }
+
+        if let Some(top_k) = self.top_k {
+            if top_k == 0 {
+                return Err("top_k must be greater than 0".to_string());
+            }
+            params.top_k = top_k;
+        }
+
+        if let Some(repeat_penalty) = self.repeat_penalty {
+            if !repeat_penalty.is_finite() || repeat_penalty <= 0.0 {
+                return Err("repeat_penalty must be a finite number > 0".to_string());
+            }
+            params.repeat_penalty = repeat_penalty;
+        }
+
+        if let Some(stop_sequences) = self.stop_sequences {
+            params.stop_sequences = stop_sequences;
+        }
+
+        if let Some(seed) = self.seed {
+            params.seed = Some(seed);
+        }
+
+        if let Some(stream) = self.stream {
+            params.stream = stream;
+        }
+
+        Ok(params)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -545,8 +615,9 @@ pub extern "C" fn mai_runtime_init(config_json: *const c_char) -> *mut RuntimeHa
             return std::ptr::null_mut();
         }
     };
-    let backend = match create_backend(backend_preference.as_deref()) {
-        Ok(backend) => backend,
+    let _ = backend_preference; // reserved for future backend selection
+    let backends = match runtime_core::create_backends() {
+        Ok(b) => b,
         Err(err) => {
             set_last_error_message(err);
             return std::ptr::null_mut();
@@ -564,7 +635,7 @@ pub extern "C" fn mai_runtime_init(config_json: *const c_char) -> *mut RuntimeHa
         }
     };
 
-    let runtime = match tokio_rt.block_on(Runtime::new(config, backend)) {
+    let runtime = match tokio_rt.block_on(Runtime::new(config, backends)) {
         Ok(runtime) => runtime,
         Err(err) => {
             set_last_error_message(format!("failed to initialize runtime core: {err}"));
@@ -671,12 +742,42 @@ pub extern "C" fn mai_chat_completion(
     completion_id: *mut u64,
 ) -> c_int {
     clear_last_error_message();
-    chat_completion_inner(handle, prompt, callback, user_data, completion_id)
+    chat_completion_inner(
+        handle,
+        prompt,
+        std::ptr::null(),
+        callback,
+        user_data,
+        completion_id,
+    )
+}
+
+/// Run chat completion with explicit generation params JSON.
+/// `params_json` should match `GenerationParams` fields as optional keys.
+#[no_mangle]
+pub extern "C" fn mai_chat_completion_with_params(
+    handle: *mut RuntimeHandle,
+    prompt: *const c_char,
+    params_json: *const c_char,
+    callback: TokenCallback,
+    user_data: *mut c_void,
+    completion_id: *mut u64,
+) -> c_int {
+    clear_last_error_message();
+    chat_completion_inner(
+        handle,
+        prompt,
+        params_json,
+        callback,
+        user_data,
+        completion_id,
+    )
 }
 
 fn chat_completion_inner(
     handle: *mut RuntimeHandle,
     prompt: *const c_char,
+    params_json: *const c_char,
     callback: TokenCallback,
     user_data: *mut c_void,
     completion_id: *mut u64,
@@ -695,6 +796,11 @@ fn chat_completion_inner(
         Err(code) => return code,
     };
 
+    let params = match parse_completion_params(params_json) {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+
     let id = handle.next_completion_id.fetch_add(1, Ordering::Relaxed);
 
     // SAFETY: `completion_id` is checked for null above and points to caller-owned writable memory.
@@ -710,7 +816,6 @@ fn chat_completion_inner(
     let user_data_bits = user_data as usize;
 
     let start_result = handle.tokio_rt.block_on(async move {
-        let params = GenerationParams::default();
         let (mut rx, cancel) = runtime
             .run_inference(&prompt, params)
             .await
@@ -728,7 +833,10 @@ fn chat_completion_inner(
             while let Some(token) = rx.recv().await {
                 let text = token.text.replace('\0', "");
                 if let Ok(c_token) = CString::new(text) {
-                    callback(c_token.as_ptr(), user_data_bits as *mut c_void);
+                    // SAFETY: Ownership is transferred to the FFI consumer, which
+                    // must release via `mai_free_string`.
+                    let raw = c_token.into_raw();
+                    callback(raw as *const c_char, user_data_bits as *mut c_void);
                 }
             }
             callback(std::ptr::null(), user_data_bits as *mut c_void);
@@ -751,6 +859,27 @@ fn chat_completion_inner(
             )
         }
     }
+}
+
+fn parse_completion_params(params_json: *const c_char) -> Result<GenerationParams, c_int> {
+    if params_json.is_null() {
+        return Ok(GenerationParams::default());
+    }
+
+    let raw = read_c_string(params_json)?;
+    if raw.trim().is_empty() {
+        return Ok(GenerationParams::default());
+    }
+
+    let req: CompletionParamsRequest = serde_json::from_str(&raw).map_err(|e| {
+        set_last_error_message(format!("invalid completion params JSON: {e}"));
+        ERR_RUNTIME
+    })?;
+
+    req.into_generation_params().map_err(|e| {
+        set_last_error_message(format!("invalid completion params: {e}"));
+        ERR_RUNTIME
+    })
 }
 
 /// Cancel an in-flight completion by ID.
@@ -1317,10 +1446,13 @@ async fn run_download_job(
         return;
     }
 
+    let backend = model_manager::ModelBackend::Llama;
+
     let metadata = model_manager::ModelMetadata {
         id: request.id.as_str().into(),
         name: request.name.clone(),
         path: request.destination_path.clone(),
+        backend,
         quantization,
         size_bytes: total_size,
         estimated_ram_bytes: total_size.saturating_mul(2),
@@ -1374,8 +1506,18 @@ fn resolve_download_request(
     }
 
     if request.destination_path.as_os_str().is_empty() {
-        request.destination_path =
-            models_dir.join(format!("{}.gguf", sanitize_model_id(&request.id)));
+        let is_mlx = request
+            .backend
+            .as_deref()
+            .map(|b| b.eq_ignore_ascii_case("mlx"))
+            .unwrap_or(false);
+
+        let sanitized = sanitize_model_id(&request.id);
+        request.destination_path = if is_mlx {
+            models_dir.join(&sanitized)
+        } else {
+            models_dir.join(format!("{sanitized}.gguf"))
+        };
     }
 
     if request.source_url.is_some() && request.source_path.is_some() {
@@ -1710,81 +1852,6 @@ fn handle_ref(handle: *mut RuntimeHandle) -> Result<&'static RuntimeHandle, c_in
     // SAFETY: handle comes from `mai_runtime_init` and remains valid until `mai_runtime_destroy`.
     let handle_ref = unsafe { &*handle };
     Ok(handle_ref)
-}
-
-fn create_backend(preferred_backend: Option<&str>) -> Result<Box<dyn InferenceBackend>, String> {
-    let requested = preferred_backend
-        .map(|v| v.trim().to_ascii_lowercase())
-        .filter(|v| !v.is_empty())
-        .or_else(|| {
-            std::env::var("MAI_BACKEND")
-                .ok()
-                .map(|v| v.trim().to_ascii_lowercase())
-                .filter(|v| !v.is_empty())
-        })
-        .unwrap_or_else(|| BACKEND_AUTO.to_string());
-
-    match requested.as_str() {
-        BACKEND_AUTO => create_backend_auto(),
-        "mlx" => create_backend_mlx(),
-        "llama" => create_backend_llama(),
-        "mock" => create_backend_mock(),
-        other => Err(format!(
-            "Unknown backend '{other}'. Supported values: auto, mlx, llama, mock"
-        )),
-    }
-}
-
-fn create_backend_auto() -> Result<Box<dyn InferenceBackend>, String> {
-    #[cfg(all(feature = "mlx-backend", target_os = "ios"))]
-    {
-        return create_backend_mlx();
-    }
-
-    #[cfg(feature = "llama-backend")]
-    {
-        return create_backend_llama();
-    }
-
-    #[cfg(feature = "mock-backend")]
-    {
-        return create_backend_mock();
-    }
-
-    #[allow(unreachable_code)]
-    Err("No inference backend feature enabled".to_string())
-}
-
-#[cfg(feature = "mlx-backend")]
-fn create_backend_mlx() -> Result<Box<dyn InferenceBackend>, String> {
-    Ok(Box::new(inference_engine::mlx_backend::MlxBackend::new()))
-}
-
-#[cfg(not(feature = "mlx-backend"))]
-fn create_backend_mlx() -> Result<Box<dyn InferenceBackend>, String> {
-    Err("MLX backend requested but crate was built without 'mlx-backend'".to_string())
-}
-
-#[cfg(feature = "llama-backend")]
-fn create_backend_llama() -> Result<Box<dyn InferenceBackend>, String> {
-    let backend =
-        inference_engine::llama_backend::LlamaBackendWrapper::new().map_err(|e| e.to_string())?;
-    Ok(Box::new(backend))
-}
-
-#[cfg(not(feature = "llama-backend"))]
-fn create_backend_llama() -> Result<Box<dyn InferenceBackend>, String> {
-    Err("llama backend requested but crate was built without 'llama-backend'".to_string())
-}
-
-#[cfg(feature = "mock-backend")]
-fn create_backend_mock() -> Result<Box<dyn InferenceBackend>, String> {
-    Ok(Box::new(inference_engine::mock_backend::MockBackend::new()))
-}
-
-#[cfg(not(feature = "mock-backend"))]
-fn create_backend_mock() -> Result<Box<dyn InferenceBackend>, String> {
-    Err("mock backend requested but crate was built without 'mock-backend'".to_string())
 }
 
 #[cfg(test)]

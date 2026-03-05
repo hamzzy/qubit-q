@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CRATE="platform-bridge"
-FEATURES="${FEATURES:-mock-backend}"
+FEATURES="${FEATURES:-llama-backend}"  # Android does not support MLX (Apple Silicon only)
 OUT_DIR="$ROOT_DIR/flutter/android/app/src/main/jniLibs"
 
 if [[ ! -d "$ROOT_DIR/flutter" ]]; then

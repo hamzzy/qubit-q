@@ -109,12 +109,13 @@ class _HomeShellState extends ConsumerState<HomeShell> {
   Widget build(BuildContext context) {
     final controller = ref.watch(runtimeControllerProvider);
     final ramPct = controller.ramUsagePct;
+    final isCompact = MediaQuery.sizeOf(context).width < 390;
 
     return LuminaBackdrop(
       child: Scaffold(
         backgroundColor: Colors.transparent,
         appBar: AppBar(
-          leadingWidth: 54,
+          leadingWidth: isCompact ? 50 : 54,
           leading: Padding(
             padding: const EdgeInsets.only(left: 12),
             child: Center(
@@ -136,10 +137,11 @@ class _HomeShellState extends ConsumerState<HomeShell> {
               ),
             ),
           ),
-          title: const Text('MAI RUNTIME'),
+          title: Text(isCompact ? 'MAI' : 'MAI RUNTIME'),
           actions: [
-            _PrivacyBadge(),
+            if (!isCompact) _PrivacyBadge(),
             IconButton(
+              visualDensity: VisualDensity.compact,
               tooltip: 'Download Models',
               onPressed: () => Navigator.of(context).push(
                 MaterialPageRoute<void>(builder: (_) => const DownloadsPage()),
@@ -147,6 +149,7 @@ class _HomeShellState extends ConsumerState<HomeShell> {
               icon: const Icon(Icons.download_rounded, size: 22),
             ),
             IconButton(
+              visualDensity: VisualDensity.compact,
               onPressed: controller.initialized ? controller.refreshAll : null,
               icon: const Icon(Icons.refresh_rounded, size: 22),
             ),

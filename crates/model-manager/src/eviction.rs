@@ -49,7 +49,7 @@ async fn delete_model_file(path: &PathBuf) -> Result<(), ModelManagerError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{InMemoryRegistry, ModelMetadata, QuantType};
+    use crate::{InMemoryRegistry, ModelBackend, ModelMetadata, QuantType};
     use chrono::{Duration, Utc};
     use tempfile::TempDir;
 
@@ -63,6 +63,7 @@ mod tests {
             id: id.into(),
             name: id.to_string(),
             path,
+            backend: ModelBackend::Llama,
             quantization: QuantType::Q4KM,
             size_bytes,
             estimated_ram_bytes: size_bytes * 2,

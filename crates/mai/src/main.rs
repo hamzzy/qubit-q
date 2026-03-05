@@ -6,10 +6,11 @@ use tokio::io::AsyncWriteExt;
 use tracing_subscriber::EnvFilter;
 
 use http_server::ServerConfig;
-use inference_engine::InferenceBackend;
 use memory_guard::MemoryGuard;
-use model_manager::{GenerationParams, ModelId, ModelMetadata, ModelRegistry, QuantType};
-use runtime_core::{Runtime, RuntimeConfig};
+use model_manager::{
+    GenerationParams, ModelId, ModelMetadata, ModelRegistry, QuantType,
+};
+use runtime_core::{Runtime, RuntimeConfig, create_backends};
 
 mod cli;
 use cli::{Cli, Commands};
@@ -109,8 +110,8 @@ async fn cmd_run(
     top_p: f32,
     model_path: Option<PathBuf>,
 ) -> Result<()> {
-    let backend = create_backend()?;
-    let runtime = Runtime::new(config, backend).await?;
+    let backends = create_backends().map_err(|e| anyhow::anyhow!(e))?;
+    let runtime = Runtime::new(config, backends).await?;
 
     // Load model
     if let Some(path) = &model_path {
@@ -185,6 +186,7 @@ async fn cmd_register(
     let metadata = ModelMetadata {
         id: ModelId::from(id.as_str()),
         name,
+        backend: model_manager::detect_backend_from_path(&path),
         path,
         quantization,
         size_bytes,
@@ -369,76 +371,6 @@ async fn cmd_serve(
     http_server::run_server(server_config, runtime_config)
         .await
         .map_err(|e| anyhow::anyhow!("HTTP server failed: {e}"))
-}
-
-fn create_backend() -> Result<Box<dyn InferenceBackend>> {
-    let requested = std::env::var("MAI_BACKEND")
-        .ok()
-        .map(|v| v.trim().to_ascii_lowercase())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "auto".to_string());
-
-    match requested.as_str() {
-        "auto" => create_backend_auto(),
-        "mlx" => create_backend_mlx(),
-        "llama" => create_backend_llama(),
-        "mock" => create_backend_mock(),
-        other => {
-            anyhow::bail!("Unknown MAI_BACKEND='{other}'. Supported values: auto, mlx, llama, mock")
-        }
-    }
-}
-
-fn create_backend_auto() -> Result<Box<dyn InferenceBackend>> {
-    #[cfg(all(feature = "mlx-backend", target_os = "ios"))]
-    {
-        return create_backend_mlx();
-    }
-
-    #[cfg(feature = "llama-backend")]
-    {
-        return create_backend_llama();
-    }
-
-    #[cfg(feature = "mock-backend")]
-    {
-        return create_backend_mock();
-    }
-
-    anyhow::bail!(
-        "No inference backend enabled. Build with --features mock-backend|llama-backend|mlx-backend"
-    )
-}
-
-#[cfg(feature = "mlx-backend")]
-fn create_backend_mlx() -> Result<Box<dyn InferenceBackend>> {
-    Ok(Box::new(inference_engine::mlx_backend::MlxBackend::new()))
-}
-
-#[cfg(not(feature = "mlx-backend"))]
-fn create_backend_mlx() -> Result<Box<dyn InferenceBackend>> {
-    anyhow::bail!("MLX backend requested but this binary was built without 'mlx-backend'")
-}
-
-#[cfg(feature = "llama-backend")]
-fn create_backend_llama() -> Result<Box<dyn InferenceBackend>> {
-    let backend = inference_engine::llama_backend::LlamaBackendWrapper::new()?;
-    Ok(Box::new(backend))
-}
-
-#[cfg(not(feature = "llama-backend"))]
-fn create_backend_llama() -> Result<Box<dyn InferenceBackend>> {
-    anyhow::bail!("llama backend requested but this binary was built without 'llama-backend'")
-}
-
-#[cfg(feature = "mock-backend")]
-fn create_backend_mock() -> Result<Box<dyn InferenceBackend>> {
-    Ok(Box::new(inference_engine::mock_backend::MockBackend::new()))
-}
-
-#[cfg(not(feature = "mock-backend"))]
-fn create_backend_mock() -> Result<Box<dyn InferenceBackend>> {
-    anyhow::bail!("mock backend requested but this binary was built without 'mock-backend'")
 }
 
 fn format_bytes(bytes: u64) -> String {

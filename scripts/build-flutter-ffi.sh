@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-FEATURES="${FEATURES:-mock-backend}"
+FEATURES="${FEATURES:-llama-backend,mlx-backend}"
 export FEATURES
 
 if [[ (! -d "$ROOT_DIR/flutter/ios/Runner.xcodeproj" || ! -d "$ROOT_DIR/flutter/android/app") && -x "$ROOT_DIR/scripts/setup-flutter-app.sh" ]]; then

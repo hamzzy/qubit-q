@@ -327,6 +327,7 @@ class _DownloadsPageState extends ConsumerState<DownloadsPage> {
       id: selectedCatalog?.id ?? _modelIdController.text.trim(),
       name: selectedCatalog?.name ?? _modelNameController.text.trim(),
       quant: selectedCatalog?.quantization ?? _quantController.text.trim(),
+      backend: selectedCatalog?.backend,
     );
 
     if (!request.hasAtMostOneSource ||
@@ -347,8 +348,9 @@ class _DownloadsPageState extends ConsumerState<DownloadsPage> {
 
   String? _resolveSelectedCatalogId(List<CatalogModel> models) {
     if (models.isEmpty) return null;
-    if (models.any((m) => m.id == _selectedCatalogModelId))
+    if (models.any((m) => m.id == _selectedCatalogModelId)) {
       return _selectedCatalogModelId;
+    }
     final fallback = models.first.id;
     _selectedCatalogModelId = fallback;
     _applyCatalogSelection(models.first);

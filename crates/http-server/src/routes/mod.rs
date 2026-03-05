@@ -1,5 +1,6 @@
 pub mod chat;
 pub mod embeddings;
+pub mod events;
 pub mod health;
 pub mod metrics;
 pub mod models;

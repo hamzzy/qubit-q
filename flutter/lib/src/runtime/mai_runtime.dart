@@ -15,7 +15,8 @@ class MaiRuntime {
 
   final MaiBindings _bindings;
   Pointer<RuntimeHandle> _handle;
-  final Map<int, _ActiveCompletion> _activeCompletions = <int, _ActiveCompletion>{};
+  final Map<int, _ActiveCompletion> _activeCompletions =
+      <int, _ActiveCompletion>{};
 
   static Future<MaiRuntime> create({Map<String, dynamic>? config}) async {
     final library = _openLibrary();
@@ -57,7 +58,8 @@ class MaiRuntime {
       return DynamicLibrary.process();
     }
 
-    throw UnsupportedError('MAI runtime is only supported on iOS/Android in this client');
+    throw UnsupportedError(
+        'MAI runtime is only supported on iOS/Android in this client');
   }
 
   static DynamicLibrary _openAppleLibraryWithFallbacks() {
@@ -97,7 +99,8 @@ class MaiRuntime {
     for (final candidate in candidates) {
       try {
         final lib = candidate.open();
-        lib.lookup<NativeFunction<Pointer<RuntimeHandle> Function(Pointer<Utf8>)>>(
+        lib.lookup<
+            NativeFunction<Pointer<RuntimeHandle> Function(Pointer<Utf8>)>>(
           'mai_runtime_init',
         );
         return lib;
@@ -145,12 +148,16 @@ class MaiRuntime {
     _throwIfErr(code, 'Failed to unload model');
   }
 
-  Future<MaiCompletion> streamCompletion(String prompt) async {
+  Future<MaiCompletion> streamCompletion(
+    String prompt, {
+    GenerationOptions options = const GenerationOptions(),
+  }) async {
     _ensureNotDisposed();
 
     final controller = StreamController<String>();
     final completionIdPtr = calloc<Uint64>();
     final promptPtr = prompt.toNativeUtf8();
+    final paramsPtr = jsonEncode(options.toJson()).toNativeUtf8();
 
     var completionId = 0;
     late final NativeCallable<TokenCallbackNative> callback;
@@ -164,31 +171,51 @@ class MaiRuntime {
         }
 
         try {
-          final token = _readUtf8Lossy(tokenPtr);
+          final token = _sanitizeToken(_readUtf8Lossy(tokenPtr));
           if (token.startsWith(_streamErrorPrefix)) {
-            controller.addError(
-              MaiRuntimeException(-3, token.substring(_streamErrorPrefix.length)),
-            );
-            final active = _activeCompletions.remove(completionId);
-            active?.close();
+            if (!controller.isClosed) {
+              controller.addError(
+                MaiRuntimeException(
+                    -3, token.substring(_streamErrorPrefix.length)),
+              );
+            }
+            cancelCompletion(completionId);
             return;
           }
-          controller.add(token);
+          if (!controller.isClosed && token.isNotEmpty) {
+            controller.add(token);
+          }
         } catch (e, st) {
-          controller.addError(e, st);
+          if (!controller.isClosed) {
+            controller.addError(e, st);
+          }
+        } finally {
+          // Rust now transfers string ownership for each token callback.
+          _bindings.maiFreeString(tokenPtr);
         }
       },
     );
 
-    final code = _bindings.maiChatCompletion(
-      _handle,
-      promptPtr,
-      callback.nativeFunction,
-      nullptr,
-      completionIdPtr,
-    );
+    final withParams = _bindings.maiChatCompletionWithParams;
+    final code = withParams != null
+        ? withParams(
+            _handle,
+            promptPtr,
+            paramsPtr,
+            callback.nativeFunction,
+            nullptr,
+            completionIdPtr,
+          )
+        : _bindings.maiChatCompletion(
+            _handle,
+            promptPtr,
+            callback.nativeFunction,
+            nullptr,
+            completionIdPtr,
+          );
 
     calloc.free(promptPtr);
+    calloc.free(paramsPtr);
 
     if (code != 0) {
       callback.close();
@@ -214,8 +241,12 @@ class MaiRuntime {
     _ensureNotDisposed();
     final code = _bindings.maiCancelCompletion(_handle, completionId);
 
-    final active = _activeCompletions.remove(completionId);
-    active?.close();
+    // Keep callback metadata alive until native emits terminal null token.
+    // Closing callback immediately can race with in-flight native callbacks.
+    final active = _activeCompletions[completionId];
+    if (active != null && !active.controller.isClosed) {
+      unawaited(active.controller.close());
+    }
 
     return code;
   }
@@ -230,7 +261,8 @@ class MaiRuntime {
     _ensureNotDisposed();
 
     if (!request.hasAtMostOneSource) {
-      throw MaiRuntimeException(-3, 'Download request cannot set both source_path and source_url');
+      throw MaiRuntimeException(
+          -3, 'Download request cannot set both source_path and source_url');
     }
 
     final requestPtr = jsonEncode(request.toJson()).toNativeUtf8();
@@ -242,7 +274,8 @@ class MaiRuntime {
 
       final ptr = outJobId.value;
       if (ptr.address == 0) {
-        throw MaiRuntimeException(-3, 'Native download start returned empty job id');
+        throw MaiRuntimeException(
+            -3, 'Native download start returned empty job id');
       }
 
       final value = ptr.toDartString();
@@ -425,7 +458,7 @@ class MaiRuntime {
     var offset = 0;
     final raw = ptr.cast<Uint8>();
     while (true) {
-      final value = raw.elementAt(offset).value;
+      final value = raw[offset];
       if (value == 0) {
         break;
       }
@@ -433,6 +466,14 @@ class MaiRuntime {
       offset += 1;
     }
     return utf8.decode(bytes, allowMalformed: true);
+  }
+
+  static String _sanitizeToken(String token) {
+    if (token.isEmpty) return token;
+    return token.replaceAll(
+      RegExp(r'[\x00-\x08\x0B\x0C\x0E-\x1F]'),
+      '',
+    );
   }
 }
 
@@ -446,7 +487,13 @@ class _ActiveCompletion {
     if (!controller.isClosed) {
       unawaited(controller.close());
     }
-    callback.close();
+    scheduleMicrotask(() {
+      try {
+        callback.close();
+      } catch (_) {
+        // Best-effort close; callback may already be closed.
+      }
+    });
   }
 }
 

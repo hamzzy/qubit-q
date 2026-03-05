@@ -54,7 +54,11 @@ class HttpMaiRuntime {
 
   // ── Chat ────────────────────────────────────────────────────────────────
 
-  Future<MaiCompletion> streamCompletion(String prompt, {required String modelId}) async {
+  Future<MaiCompletion> streamCompletion(
+    String prompt, {
+    required String modelId,
+    GenerationOptions options = const GenerationOptions(),
+  }) async {
     _ensureNotDisposed();
 
     final controller = StreamController<String>();
@@ -65,9 +69,17 @@ class HttpMaiRuntime {
         {'role': 'user', 'content': prompt},
       ],
       'stream': true,
+      'max_tokens': options.maxTokens,
+      'temperature': options.temperature,
+      'top_p': options.topP,
+      'top_k': options.topK,
+      'repeat_penalty': options.repeatPenalty,
+      'stop_sequences': options.stopSequences,
+      'seed': options.seed,
     });
 
-    final request = http.Request('POST', Uri.parse('$baseUrl/v1/chat/completions'));
+    final request =
+        http.Request('POST', Uri.parse('$baseUrl/v1/chat/completions'));
     request.headers['Content-Type'] = 'application/json';
     _applyAuth(request.headers);
     request.body = body;
@@ -90,7 +102,8 @@ class HttpMaiRuntime {
     if (response.statusCode != 200) {
       final body = await response.stream.bytesToString();
       _closeCompletion(completionId);
-      throw MaiRuntimeException(-3, 'Chat completion HTTP ${response.statusCode}: $body');
+      throw MaiRuntimeException(
+          -3, 'Chat completion HTTP ${response.statusCode}: $body');
     }
 
     // Parse SSE lines
@@ -109,12 +122,14 @@ class HttpMaiRuntime {
           final json = jsonDecode(payload) as Map<String, dynamic>;
           final choices = json['choices'] as List<dynamic>?;
           if (choices != null && choices.isNotEmpty) {
-            final delta = (choices[0] as Map<String, dynamic>)['delta'] as Map<String, dynamic>?;
+            final delta = (choices[0] as Map<String, dynamic>)['delta']
+                as Map<String, dynamic>?;
             final content = delta?['content'] as String?;
             if (content != null && !controller.isClosed) {
               if (content.startsWith(_streamErrorPrefix)) {
                 controller.addError(
-                  MaiRuntimeException(-3, content.substring(_streamErrorPrefix.length)),
+                  MaiRuntimeException(
+                      -3, content.substring(_streamErrorPrefix.length)),
                 );
                 _closeCompletion(completionId);
                 return;
@@ -197,7 +212,8 @@ class HttpMaiRuntime {
 
   Future<String> retryDownload(String jobId) async {
     _ensureNotDisposed();
-    final response = await _post('/v1/models/downloads/$jobId/retry', <String, dynamic>{});
+    final response =
+        await _post('/v1/models/downloads/$jobId/retry', <String, dynamic>{});
     final json = _decodeJson(response);
     final job = json['job'] as Map<String, dynamic>;
     return job['job_id'] as String;
@@ -218,7 +234,8 @@ class HttpMaiRuntime {
     _applyAuth(headers);
     final response = await http.delete(uri, headers: headers);
     if (response.statusCode >= 400) {
-      throw MaiRuntimeException(-3, 'HTTP ${response.statusCode}: ${response.body}');
+      throw MaiRuntimeException(
+          -3, 'HTTP ${response.statusCode}: ${response.body}');
     }
   }
 
@@ -264,7 +281,8 @@ class HttpMaiRuntime {
     _applyAuth(headers);
     final response = await http.get(uri, headers: headers);
     if (response.statusCode >= 400) {
-      throw MaiRuntimeException(-3, 'HTTP ${response.statusCode}: ${response.body}');
+      throw MaiRuntimeException(
+          -3, 'HTTP ${response.statusCode}: ${response.body}');
     }
     return response;
   }
@@ -273,9 +291,11 @@ class HttpMaiRuntime {
     final uri = Uri.parse('$baseUrl$path');
     final headers = <String, String>{'Content-Type': 'application/json'};
     _applyAuth(headers);
-    final response = await http.post(uri, headers: headers, body: jsonEncode(body));
+    final response =
+        await http.post(uri, headers: headers, body: jsonEncode(body));
     if (response.statusCode >= 400) {
-      throw MaiRuntimeException(-3, 'HTTP ${response.statusCode}: ${response.body}');
+      throw MaiRuntimeException(
+          -3, 'HTTP ${response.statusCode}: ${response.body}');
     }
     return response;
   }
@@ -309,6 +329,69 @@ class HttpMaiRuntime {
       ramTotalBytes: extractInt('mai_ram_total_bytes'),
       ramFreeBytes: extractInt('mai_ram_free_bytes'),
     );
+  }
+
+  // ── Event Stream (SSE) ──────────────────────────────────────────────
+
+  /// Subscribe to real-time download progress and metrics updates via SSE.
+  /// Returns a broadcast stream of [EventUpdate]. The caller should cancel
+  /// the returned [StreamSubscription] when no longer needed.
+  Stream<EventUpdate> eventStream() {
+    _ensureNotDisposed();
+    final controller = StreamController<EventUpdate>.broadcast();
+    final client = http.Client();
+    final request = http.Request('GET', Uri.parse('$baseUrl/v1/events'));
+    _applyAuth(request.headers);
+    request.headers['Accept'] = 'text/event-stream';
+
+    client.send(request).then((response) {
+      if (response.statusCode != 200) {
+        controller.addError(MaiRuntimeException(
+            -3, 'Event stream HTTP ${response.statusCode}'));
+        controller.close();
+        client.close();
+        return;
+      }
+
+      final subscription = response.stream
+          .transform(const Utf8Decoder(allowMalformed: true))
+          .transform(const LineSplitter())
+          .listen(
+        (line) {
+          if (!line.startsWith('data: ')) return;
+          final payload = line.substring(6).trim();
+          if (payload.isEmpty) return;
+          try {
+            final json = jsonDecode(payload) as Map<String, dynamic>;
+            if (!controller.isClosed) {
+              controller.add(EventUpdate.fromJson(json));
+            }
+          } catch (_) {
+            // Skip malformed SSE events
+          }
+        },
+        onError: (Object err) {
+          if (!controller.isClosed) controller.addError(err);
+        },
+        onDone: () {
+          if (!controller.isClosed) controller.close();
+          client.close();
+        },
+      );
+
+      controller.onCancel = () {
+        subscription.cancel();
+        client.close();
+      };
+    }).catchError((Object err) {
+      if (!controller.isClosed) {
+        controller.addError(err);
+        controller.close();
+      }
+      client.close();
+    });
+
+    return controller.stream;
   }
 
   void _ensureNotDisposed() {

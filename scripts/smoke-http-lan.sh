@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+FEATURES="${FEATURES:-llama-backend}"
 PORT="${PORT:-18080}"
 API_KEY="${API_KEY:-test-key}"
 LAN_MODE="${LAN_MODE:-0}"
@@ -29,7 +30,7 @@ if [[ -n "$TLS_CERT" && -n "$TLS_KEY" ]]; then
   serve_args+=(--tls-cert "$TLS_CERT" --tls-key "$TLS_KEY")
 fi
 
-cargo run -p mai --features mock-backend -- "${serve_args[@]}" >/tmp/mai-serve.log 2>&1 &
+cargo run -p mai --features "$FEATURES" -- "${serve_args[@]}" >/tmp/mai-serve.log 2>&1 &
 SERVER_PID=$!
 
 echo "started server pid=$SERVER_PID"

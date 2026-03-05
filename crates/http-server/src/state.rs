@@ -6,6 +6,7 @@ use std::sync::{Arc, RwLock};
 use chrono::{DateTime, Utc};
 use runtime_core::Runtime;
 use serde::{Deserialize, Serialize};
+use tokio::sync::Semaphore;
 
 #[derive(Debug, Default)]
 pub struct Metrics {
@@ -309,6 +310,10 @@ pub struct AppState {
     pub api_key: Option<String>,
     pub metrics: Arc<Metrics>,
     pub downloads: Arc<DownloadTracker>,
+    /// Limits concurrent inference requests. Only one inference can run at a
+    /// time (the engine holds a Mutex internally), so this semaphore gives
+    /// callers a clear "busy" error instead of blocking indefinitely.
+    pub inference_semaphore: Arc<Semaphore>,
 }
 
 impl AppState {
@@ -318,6 +323,7 @@ impl AppState {
             api_key,
             metrics: Arc::new(Metrics::default()),
             downloads: Arc::new(DownloadTracker::default()),
+            inference_semaphore: Arc::new(Semaphore::new(1)),
         }
     }
 }

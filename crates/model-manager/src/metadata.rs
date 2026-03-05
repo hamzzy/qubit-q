@@ -107,6 +107,28 @@ impl FromStr for QuantType {
     }
 }
 
+/// Which inference backend handles this model format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelBackend {
+    /// llama.cpp via GGUF file. Works on all platforms.
+    #[default]
+    Llama,
+}
+
+impl fmt::Display for ModelBackend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ModelBackend::Llama => write!(f, "llama"),
+        }
+    }
+}
+
+/// Detect the backend from a file path. Currently always returns `Llama`.
+pub fn detect_backend_from_path(_path: &std::path::Path) -> ModelBackend {
+    ModelBackend::Llama
+}
+
 /// State of a model in its lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModelState {
@@ -124,6 +146,9 @@ pub struct ModelMetadata {
     pub id: ModelId,
     pub name: String,
     pub path: PathBuf,
+    /// Which inference backend handles this model. Defaults to `llama` (GGUF).
+    #[serde(default)]
+    pub backend: ModelBackend,
     pub quantization: QuantType,
     pub size_bytes: u64,
     pub estimated_ram_bytes: u64,
@@ -170,6 +195,7 @@ pub fn dummy_metadata() -> ModelMetadata {
         id: ModelId("test-model".into()),
         name: "Test Model".into(),
         path: PathBuf::from("/tmp/test.gguf"),
+        backend: ModelBackend::Llama,
         quantization: QuantType::Q4KM,
         size_bytes: 1_000_000,
         estimated_ram_bytes: 2_000_000,

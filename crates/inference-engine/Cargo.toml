@@ -6,8 +6,6 @@ edition = "2021"
 [features]
 default = []
 llama-backend = ["llama-cpp-2"]
-mlx-backend = []
-mock-backend = []
 
 [dependencies]
 model-manager = { workspace = true }

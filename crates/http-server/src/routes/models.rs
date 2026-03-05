@@ -352,6 +352,7 @@ async fn run_download_job(
         id: spec.id.as_str().into(),
         name: spec.name.clone(),
         path: spec.destination_path.clone(),
+        backend: model_manager::detect_backend_from_path(&spec.destination_path),
         quantization,
         size_bytes: total_size,
         estimated_ram_bytes: total_size.saturating_mul(2),

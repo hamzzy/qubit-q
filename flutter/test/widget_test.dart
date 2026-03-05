@@ -11,8 +11,8 @@ void main() {
       ),
     );
 
-    expect(find.text('LUMINA'), findsOneWidget);
-    expect(find.text('Chat'), findsOneWidget);
+    expect(find.text('MAI RUNTIME'), findsOneWidget);
+    expect(find.text('Home'), findsOneWidget);
     expect(find.text('Models'), findsOneWidget);
     expect(find.text('Stats'), findsOneWidget);
 

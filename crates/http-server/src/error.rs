@@ -14,6 +14,9 @@ pub enum HttpServerError {
     #[error("runtime error: {0}")]
     Runtime(String),
 
+    #[error("service busy: {0}")]
+    Busy(String),
+
     #[error("internal error: {0}")]
     Internal(String),
 }
@@ -24,6 +27,7 @@ impl IntoResponse for HttpServerError {
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized".to_string()),
             Self::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
             Self::Runtime(m) => (StatusCode::UNPROCESSABLE_ENTITY, m),
+            Self::Busy(m) => (StatusCode::SERVICE_UNAVAILABLE, m),
             Self::Internal(m) => (StatusCode::INTERNAL_SERVER_ERROR, m),
         };
 

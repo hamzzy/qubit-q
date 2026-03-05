@@ -174,14 +174,9 @@ fn create_benchmark_backend() -> Result<Box<dyn InferenceBackend>, ProfilerError
         return Ok(Box::new(backend));
     }
 
-    #[cfg(all(feature = "mock-backend", not(feature = "llama-backend")))]
-    {
-        return Ok(Box::new(inference_engine::mock_backend::MockBackend::new()));
-    }
-
     #[allow(unreachable_code)]
     Err(ProfilerError::UnsupportedPlatform(
-        "No benchmark backend enabled (enable mock-backend or llama-backend)".into(),
+        "No benchmark backend enabled (enable llama-backend feature)".into(),
     ))
 }
 
@@ -212,8 +207,6 @@ fn model_fingerprint(model_path: &Path) -> Result<String, ProfilerError> {
 fn backend_kind() -> &'static str {
     if cfg!(feature = "llama-backend") {
         "llama-backend"
-    } else if cfg!(feature = "mock-backend") {
-        "mock-backend"
     } else {
         "none"
     }

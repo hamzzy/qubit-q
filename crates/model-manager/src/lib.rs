@@ -9,6 +9,9 @@ pub mod verifier;
 pub use downloader::*;
 pub use error::*;
 pub use eviction::*;
-pub use metadata::*;
+pub use metadata::{
+    detect_backend_from_path, GenerationParams, ModelBackend, ModelId, ModelMetadata, ModelState,
+    QuantType,
+};
 pub use registry::*;
 pub use verifier::*;

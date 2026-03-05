@@ -1,7 +1,14 @@
 use sysinfo::{MemoryRefreshKind, RefreshKind, System};
 use tracing::info;
 
-/// Detects system memory using the `sysinfo` crate.
+/// Detects system memory using platform-native APIs where possible,
+/// falling back to the `sysinfo` crate.
+///
+/// On Apple platforms (macOS/iOS), uses `os_proc_available_memory()` which
+/// accounts for compressed memory, purgeable caches, and the jetsam limit —
+/// giving a realistic "how much can I actually allocate" answer instead of
+/// the misleadingly low `vm_statistics64` free+inactive count.
+///
 /// Supports `SIMULATE_RAM_MB` env var to simulate low-RAM devices for testing.
 pub struct SystemMemoryDetector {
     system: System,
@@ -42,12 +49,15 @@ impl SystemMemoryDetector {
             .unwrap_or_else(|| self.system.total_memory())
     }
 
-    /// Available RAM in bytes.
+    /// Available RAM in bytes — the amount the process can actually allocate.
+    ///
+    /// On Apple platforms this uses `os_proc_available_memory()` which is the
+    /// OS-recommended API and accounts for memory compression, purgeable pages,
+    /// and the per-process jetsam limit on iOS.
     pub fn available_ram(&mut self) -> u64 {
         self.refresh();
 
         if let Some(sim_total) = self.simulated_total {
-            // Simulate: apply same usage ratio as real system, with 1GB OS overhead floor
             let real_total = self.system.total_memory();
             if real_total == 0 {
                 return sim_total / 2;
@@ -90,9 +100,9 @@ fn platform_total_memory_bytes() -> Option<u64> {
         return android_meminfo_bytes().map(|(total, _)| total);
     }
 
-    #[cfg(target_os = "ios")]
+    #[cfg(any(target_os = "ios", target_os = "macos"))]
     {
-        return ios_total_memory_bytes();
+        return apple_total_memory_bytes();
     }
 
     #[allow(unreachable_code)]
@@ -105,9 +115,14 @@ fn platform_available_memory_bytes() -> Option<u64> {
         return android_meminfo_bytes().map(|(_, available)| available);
     }
 
-    #[cfg(target_os = "ios")]
+    // Use os_proc_available_memory() on both macOS and iOS.
+    // This is the Apple-recommended API that accounts for compressed memory,
+    // purgeable caches, and the iOS jetsam limit. It returns how much memory
+    // the current process can realistically allocate before the OS starts
+    // killing things — far more accurate than raw vm_statistics64.
+    #[cfg(any(target_os = "ios", target_os = "macos"))]
     {
-        return ios_available_memory_bytes();
+        return apple_available_memory_bytes();
     }
 
     #[allow(unreachable_code)]
@@ -134,8 +149,9 @@ fn parse_meminfo_kb(meminfo: &str, key: &str) -> Option<u64> {
     })
 }
 
-#[cfg(target_os = "ios")]
-fn ios_total_memory_bytes() -> Option<u64> {
+/// Total physical RAM via sysctl on macOS/iOS.
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+fn apple_total_memory_bytes() -> Option<u64> {
     let mut memsize: u64 = 0;
     let mut size = std::mem::size_of::<u64>();
     let key = b"hw.memsize\0";
@@ -156,9 +172,38 @@ fn ios_total_memory_bytes() -> Option<u64> {
     }
 }
 
-#[cfg(target_os = "ios")]
+/// Available memory via `os_proc_available_memory()` on macOS/iOS.
+///
+/// This is the Apple-recommended API (available since macOS 12 / iOS 15).
+/// It returns the number of bytes the process can allocate before hitting
+/// memory pressure / jetsam limits, accounting for:
+/// - Compressed memory that can be reclaimed
+/// - Purgeable/cached pages
+/// - The per-process jetsam limit on iOS
+///
+/// Falls back to `vm_statistics64` free+inactive+purgeable if unavailable.
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+fn apple_available_memory_bytes() -> Option<u64> {
+    extern "C" {
+        fn os_proc_available_memory() -> usize;
+    }
+    // Try os_proc_available_memory() first (macOS 12+ / iOS 15+).
+    // SAFETY: This is a simple C function with no preconditions, available
+    // since macOS 12 / iOS 15. Returns 0 on older OS versions.
+    let available = unsafe { os_proc_available_memory() };
+    if available > 0 {
+        return Some(available as u64);
+    }
+
+    // Fallback for older OS versions: use vm_statistics64 but include
+    // purgeable pages (which the old code missed).
+    apple_vm_stat_available()
+}
+
+/// Fallback: vm_statistics64 with free + inactive + purgeable pages.
+#[cfg(any(target_os = "ios", target_os = "macos"))]
 #[allow(deprecated)]
-fn ios_available_memory_bytes() -> Option<u64> {
+fn apple_vm_stat_available() -> Option<u64> {
     // SAFETY: mach host APIs are called with valid pointers and checked return codes.
     unsafe {
         let host = libc::mach_host_self();
@@ -179,7 +224,10 @@ fn ios_available_memory_bytes() -> Option<u64> {
             return None;
         }
 
-        let available_pages = vm_stat.free_count + vm_stat.inactive_count;
+        // Include purgeable pages — these are reclaimable by the OS on demand
+        // and should count as "available" for our purposes.
+        let available_pages =
+            vm_stat.free_count + vm_stat.inactive_count + vm_stat.purgeable_count;
         Some((available_pages as u64) * page_size)
     }
 }

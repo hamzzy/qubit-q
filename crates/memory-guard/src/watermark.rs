@@ -147,6 +147,7 @@ mod tests {
             id: "test".into(),
             name: "Test".into(),
             path: PathBuf::from("/tmp/test.gguf"),
+            backend: model_manager::ModelBackend::Llama,
             quantization: QuantType::Q4KM,
             size_bytes: 1_000_000,
             estimated_ram_bytes: estimated_ram,

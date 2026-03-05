@@ -15,18 +15,6 @@ llama-backend = [
     "http-server/llama-backend",
     "device-profiler/llama-backend",
 ]
-mlx-backend = [
-    "runtime-core/mlx-backend",
-    "inference-engine/mlx-backend",
-    "http-server/mlx-backend",
-    "device-profiler/mlx-backend",
-]
-mock-backend = [
-    "runtime-core/mock-backend",
-    "inference-engine/mock-backend",
-    "http-server/mock-backend",
-    "device-profiler/mock-backend",
-]
 
 [dependencies]
 runtime-core = { workspace = true, default-features = false }

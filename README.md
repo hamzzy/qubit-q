@@ -36,12 +36,12 @@ This is the fastest path to run the stack without local model setup.
 
 ### 2) Build workspace
 ```bash
-cargo build --workspace --features mock-backend
+cargo build --workspace --features llama-backend
 ```
 
 ### 3) Run HTTP server
 ```bash
-cargo run -p mai --features mock-backend -- serve --port 11434 --api-key test-key
+cargo run -p mai --features llama-backend -- serve --port 11434 --api-key test-key
 ```
 
 ### 4) Verify server
@@ -60,13 +60,13 @@ cargo run -p mai -- --help
 ### Common flows
 ```bash
 # Profile device and capabilities
-cargo run -p mai --features mock-backend -- profile
+cargo run -p mai --features llama-backend -- profile
 
 # List registered models
-cargo run -p mai --features mock-backend -- models
+cargo run -p mai --features llama-backend -- models
 
 # Serve OpenAI-compatible API
-cargo run -p mai --features mock-backend -- serve --port 11434 --api-key test-key
+cargo run -p mai --features llama-backend -- serve --port 11434 --api-key test-key
 ```
 
 ## HTTP API Endpoints

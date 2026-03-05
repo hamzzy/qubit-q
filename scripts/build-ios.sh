@@ -3,7 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CRATE="platform-bridge"
-FEATURES="${FEATURES:-mock-backend}"
+FEATURES="${FEATURES:-llama-backend,mlx-backend}"
+IOS_DEPLOYMENT_TARGET="${IOS_DEPLOYMENT_TARGET:-13.0}"
 TARGETS=(
   "aarch64-apple-ios"
   "aarch64-apple-ios-sim"
@@ -15,7 +16,9 @@ MODULEMAP_OUT="$ROOT_DIR/bindings/ios/module.modulemap"
 XCFRAMEWORK_OUT="$ROOT_DIR/bindings/ios/MobileAIRuntime.xcframework"
 SIM_UNIVERSAL_DIR="$ROOT_DIR/target/ios-simulator-universal/release"
 SIM_UNIVERSAL_LIB="$SIM_UNIVERSAL_DIR/libplatform_bridge.a"
-DEVICE_LIB="$ROOT_DIR/target/aarch64-apple-ios/release/libplatform_bridge.a"
+DEVICE_LIB="$ROOT_DIR/target/aarch64-apple-ios/release/libplatform_bridge_packaged.a"
+SIM_ARM64_LIB="$ROOT_DIR/target/aarch64-apple-ios-sim/release/libplatform_bridge_packaged.a"
+SIM_X86_64_LIB="$ROOT_DIR/target/x86_64-apple-ios/release/libplatform_bridge_packaged.a"
 SIM_SLICE_DIR="ios-arm64_x86_64-simulator"
 DEVICE_SLICE_DIR="ios-arm64"
 
@@ -37,12 +40,77 @@ ensure_target() {
 
 for target in "${TARGETS[@]}"; do
   ensure_target "$target"
-  cargo build \
-    --release \
-    --target "$target" \
-    -p "$CRATE" \
-    --no-default-features \
-    --features "$FEATURES"
+  if [[ "$target" == "aarch64-apple-ios" ]]; then
+    deploy_env="IPHONEOS_DEPLOYMENT_TARGET"
+  else
+    deploy_env="IPHONESIMULATOR_DEPLOYMENT_TARGET"
+  fi
+
+  env \
+    "$deploy_env=$IOS_DEPLOYMENT_TARGET" \
+    CMAKE_OSX_DEPLOYMENT_TARGET="$IOS_DEPLOYMENT_TARGET" \
+    CFLAGS="-fno-stack-check ${CFLAGS:-}" \
+    CXXFLAGS="-fno-stack-check ${CXXFLAGS:-}" \
+    cargo build \
+      --release \
+      --target "$target" \
+      -p "$CRATE" \
+      --no-default-features \
+      --features "$FEATURES"
+done
+
+latest_llama_build_dir() {
+  local target="$1"
+  local build_root="$ROOT_DIR/target/$target/release/build"
+  local newest_dir=""
+  local newest_mtime=0
+  local candidate
+  local mtime
+
+  shopt -s nullglob
+  for candidate in "$build_root"/llama-cpp-sys-2-*; do
+    [[ -d "$candidate/out/build" ]] || continue
+    mtime="$(stat -f %m "$candidate" 2>/dev/null || echo 0)"
+    if (( mtime > newest_mtime )); then
+      newest_mtime="$mtime"
+      newest_dir="$candidate"
+    fi
+  done
+  shopt -u nullglob
+
+  if [[ -n "$newest_dir" ]]; then
+    printf '%s\n' "$newest_dir"
+  fi
+}
+
+package_target_archive() {
+  local target="$1"
+  local base_lib="$ROOT_DIR/target/$target/release/libplatform_bridge.a"
+  local packaged_lib="$ROOT_DIR/target/$target/release/libplatform_bridge_packaged.a"
+  local llama_dir
+  local httplib_lib=""
+
+  if [[ ! -f "$base_lib" ]]; then
+    echo "error: missing base archive for $target at $base_lib" >&2
+    exit 1
+  fi
+
+  llama_dir="$(latest_llama_build_dir "$target" || true)"
+  if [[ -n "$llama_dir" ]]; then
+    httplib_lib="$llama_dir/out/build/vendor/cpp-httplib/libcpp-httplib.a"
+  fi
+
+  if [[ ! -f "$httplib_lib" ]]; then
+    cp "$base_lib" "$packaged_lib"
+    return 0
+  fi
+
+  echo "Packaging $target archive with cpp-httplib from: $httplib_lib"
+  libtool -static -o "$packaged_lib" "$base_lib" "$httplib_lib"
+}
+
+for target in "${TARGETS[@]}"; do
+  package_target_archive "$target"
 done
 
 if command -v cbindgen >/dev/null 2>&1; then
@@ -68,8 +136,8 @@ MMEOF
 
 mkdir -p "$SIM_UNIVERSAL_DIR"
 lipo -create \
-  "$ROOT_DIR/target/aarch64-apple-ios-sim/release/libplatform_bridge.a" \
-  "$ROOT_DIR/target/x86_64-apple-ios/release/libplatform_bridge.a" \
+  "$SIM_ARM64_LIB" \
+  "$SIM_X86_64_LIB" \
   -output "$SIM_UNIVERSAL_LIB"
 
 copy_headers() {

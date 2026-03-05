@@ -81,9 +81,9 @@ fn platform_total_memory_bytes() -> Option<u64> {
         return android_meminfo_bytes().map(|(total, _)| total);
     }
 
-    #[cfg(target_os = "ios")]
+    #[cfg(any(target_os = "ios", target_os = "macos"))]
     {
-        return ios_total_memory_bytes();
+        return apple_total_memory_bytes();
     }
 
     #[allow(unreachable_code)]
@@ -96,9 +96,9 @@ fn platform_available_memory_bytes() -> Option<u64> {
         return android_meminfo_bytes().map(|(_, available)| available);
     }
 
-    #[cfg(target_os = "ios")]
+    #[cfg(any(target_os = "ios", target_os = "macos"))]
     {
-        return ios_available_memory_bytes();
+        return apple_available_memory_bytes();
     }
 
     #[allow(unreachable_code)]
@@ -125,8 +125,9 @@ fn parse_meminfo_kb(meminfo: &str, key: &str) -> Option<u64> {
     })
 }
 
-#[cfg(target_os = "ios")]
-fn ios_total_memory_bytes() -> Option<u64> {
+/// Total physical RAM via sysctl on macOS/iOS.
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+fn apple_total_memory_bytes() -> Option<u64> {
     let mut memsize: u64 = 0;
     let mut size = std::mem::size_of::<u64>();
     let key = b"hw.memsize\0";
@@ -147,9 +148,25 @@ fn ios_total_memory_bytes() -> Option<u64> {
     }
 }
 
-#[cfg(target_os = "ios")]
+/// Available memory via `os_proc_available_memory()` on macOS/iOS.
+/// Falls back to vm_statistics64 free+inactive+purgeable if unavailable.
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+fn apple_available_memory_bytes() -> Option<u64> {
+    extern "C" {
+        fn os_proc_available_memory() -> usize;
+    }
+    // SAFETY: Simple C function with no preconditions (macOS 12+ / iOS 15+).
+    let available = unsafe { os_proc_available_memory() };
+    if available > 0 {
+        return Some(available as u64);
+    }
+
+    apple_vm_stat_available()
+}
+
+#[cfg(any(target_os = "ios", target_os = "macos"))]
 #[allow(deprecated)]
-fn ios_available_memory_bytes() -> Option<u64> {
+fn apple_vm_stat_available() -> Option<u64> {
     // SAFETY: mach host APIs are called with valid pointers and checked return codes.
     unsafe {
         let host = libc::mach_host_self();
@@ -170,7 +187,8 @@ fn ios_available_memory_bytes() -> Option<u64> {
             return None;
         }
 
-        let available_pages = vm_stat.free_count + vm_stat.inactive_count;
+        let available_pages =
+            vm_stat.free_count + vm_stat.inactive_count + vm_stat.purgeable_count;
         Some((available_pages as u64) * page_size)
     }
 }

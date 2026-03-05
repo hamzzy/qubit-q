@@ -29,7 +29,7 @@ impl Default for RuntimeConfig {
             logs_dir: mai_dir.join("logs"),
             max_storage_bytes: 10 * 1024 * 1024 * 1024, // 10 GB
             max_context_tokens: 2048,
-            memory_safety_margin_pct: 0.25,
+            memory_safety_margin_pct: 0.10,
             inference_timeout_secs: 300,
             africa_mode: false,
             auto_select_quantization: true,
@@ -53,9 +53,14 @@ impl RuntimeConfig {
 
     /// Ensure all required directories exist.
     pub fn ensure_dirs(&self) -> Result<(), std::io::Error> {
-        std::fs::create_dir_all(&self.models_dir)?;
-        std::fs::create_dir_all(&self.cache_dir)?;
-        std::fs::create_dir_all(&self.logs_dir)?;
+        for dir in [&self.models_dir, &self.cache_dir, &self.logs_dir] {
+            std::fs::create_dir_all(dir).map_err(|e| {
+                std::io::Error::new(
+                    e.kind(),
+                    format!("cannot create directory '{}': {e}", dir.display()),
+                )
+            })?;
+        }
         Ok(())
     }
 }

@@ -1,3 +1,7 @@
 // Force-link Rust C ABI symbols so Dart FFI can resolve them via DynamicLibrary.process().
-OTHER_LDFLAGS[sdk=iphonesimulator*]=$(inherited) -force_load $(SRCROOT)/Runner/Frameworks/MobileAIRuntime.xcframework/ios-arm64_x86_64-simulator/libplatform_bridge.a
-OTHER_LDFLAGS[sdk=iphoneos*]=$(inherited) -force_load $(SRCROOT)/Runner/Frameworks/MobileAIRuntime.xcframework/ios-arm64/libplatform_bridge.a
+// SDKROOT must be set explicitly — Flutter 3.40+ native_assets sub-target requires it.
+SDKROOT[sdk=iphonesimulator*]=iphonesimulator
+SDKROOT[sdk=iphoneos*]=iphoneos
+MAI_NATIVE_LDFLAGS=$(inherited) -lc++ -framework Accelerate -framework Metal -framework MetalKit
+OTHER_LDFLAGS[sdk=iphonesimulator*]=$(MAI_NATIVE_LDFLAGS) -force_load $(SRCROOT)/Runner/Frameworks/MobileAIRuntime.xcframework/ios-arm64_x86_64-simulator/libplatform_bridge.a
+OTHER_LDFLAGS[sdk=iphoneos*]=$(MAI_NATIVE_LDFLAGS) -force_load $(SRCROOT)/Runner/Frameworks/MobileAIRuntime.xcframework/ios-arm64/libplatform_bridge.a

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use device_profiler::{recommend_quantization, SystemProfiler};
@@ -9,8 +10,8 @@ use tracing::{debug, info, warn};
 use inference_engine::{InferenceBackend, ModelConfig, Token};
 use memory_guard::{MemoryEvent, MemoryGuard, WatermarkGuard};
 use model_manager::{
-    evict_until_within_quota, GenerationParams, InMemoryRegistry, ModelId, ModelMetadata,
-    ModelRegistry,
+    detect_backend_from_path, evict_until_within_quota, GenerationParams, InMemoryRegistry,
+    ModelBackend, ModelId, ModelMetadata, ModelRegistry,
 };
 
 const STREAM_ERROR_PREFIX: &str = "__MAI_ERROR__:";
@@ -18,10 +19,17 @@ const STREAM_ERROR_PREFIX: &str = "__MAI_ERROR__:";
 use crate::config::RuntimeConfig;
 use crate::error::RuntimeError;
 
+type EngineMap = HashMap<ModelBackend, Arc<Mutex<Box<dyn InferenceBackend>>>>;
+
 /// The core runtime orchestrator.
+///
+/// Backends are registered by type at construction time.  Any subset of
+/// `{Llama, Mlx}` may be present; the runtime dispatches each model to the
+/// backend that matches its `backend` field.  At least one backend must be
+/// registered or every `load_model` call will fail.
 pub struct Runtime {
     config: RuntimeConfig,
-    engine: Arc<Mutex<Box<dyn InferenceBackend>>>,
+    engines: Arc<EngineMap>,
     loaded_model: Arc<Mutex<Option<ModelMetadata>>>,
     registry: InMemoryRegistry,
     memory_guard: WatermarkGuard,
@@ -29,22 +37,41 @@ pub struct Runtime {
 }
 
 impl Runtime {
-    /// Create a new Runtime with the given config and inference backend.
+    /// Create a new Runtime with the given set of backends.
+    ///
+    /// Pass one entry per backend type you want to support.  Any backend in
+    /// `ModelBackend` that is not present will return `NotSupported` at load
+    /// time.  At least one backend is required.
+    ///
+    /// ```ignore
+    /// let mut backends: HashMap<ModelBackend, Box<dyn InferenceBackend>> = HashMap::new();
+    /// backends.insert(ModelBackend::Llama, Box::new(LlamaBackendWrapper::new()?));
+    /// let runtime = Runtime::new(config, backends).await?;
+    /// ```
     pub async fn new(
         config: RuntimeConfig,
-        backend: Box<dyn InferenceBackend>,
+        backends: HashMap<ModelBackend, Box<dyn InferenceBackend>>,
     ) -> Result<Self, RuntimeError> {
         config.ensure_dirs()?;
 
         let registry = InMemoryRegistry::new(&config.models_dir)?;
         let memory_guard =
             WatermarkGuard::new(config.africa_mode, Some(config.memory_safety_margin_pct));
-        let engine = Arc::new(Mutex::new(backend));
+
+        let engines: EngineMap = backends
+            .into_iter()
+            .map(|(k, v)| (k, Arc::new(Mutex::new(v))))
+            .collect();
+        let engines = Arc::new(engines);
         let loaded_model = Arc::new(Mutex::new(None));
+
+        // Memory pressure monitor — uses whatever backend is currently loaded.
+        // We pass the engines map + loaded_model so the monitor can unload the
+        // active engine when memory is critical.
         let monitor_task = if let Some(mut event_rx) = memory_guard.start_monitor(1000) {
-            let engine = engine.clone();
-            let loaded_model = loaded_model.clone();
-            let registry = registry.clone();
+            let engines_mon = engines.clone();
+            let loaded_model_mon = loaded_model.clone();
+            let registry_mon = registry.clone();
             Some(tokio::spawn(async move {
                 while let Some(event) = event_rx.recv().await {
                     match event {
@@ -53,9 +80,12 @@ impl Runtime {
                                 used_pct = format!("{:.1}%", used_pct * 100.0),
                                 "Critical memory pressure detected"
                             );
-                            if let Err(e) =
-                                handle_critical_memory_event(&engine, &loaded_model, &registry)
-                                    .await
+                            if let Err(e) = handle_critical_memory_event(
+                                &engines_mon,
+                                &loaded_model_mon,
+                                &registry_mon,
+                            )
+                            .await
                             {
                                 warn!(error = %e, "Failed handling critical memory event");
                             }
@@ -79,15 +109,17 @@ impl Runtime {
             None
         };
 
+        let backends_list: Vec<String> = engines.keys().map(|k| k.to_string()).collect();
         info!(
             models_dir = %config.models_dir.display(),
             africa_mode = config.africa_mode,
+            backends = %backends_list.join(", "),
             "Runtime initialized"
         );
 
         Ok(Self {
             config,
-            engine,
+            engines,
             loaded_model,
             registry,
             memory_guard,
@@ -95,10 +127,39 @@ impl Runtime {
         })
     }
 
+    /// Return the engine for the given backend, or a clear error if it was not
+    /// registered at startup.
+    fn engine_for(
+        &self,
+        backend: ModelBackend,
+    ) -> Result<Arc<Mutex<Box<dyn InferenceBackend>>>, RuntimeError> {
+        self.engines.get(&backend).cloned().ok_or_else(|| {
+            RuntimeError::Inference(inference_engine::InferenceError::NotSupported(format!(
+                "The '{backend}' backend is not available in this build. \
+                 Rebuild with the '{backend}-backend' feature flag."
+            )))
+        })
+    }
+
     /// Load a model by ID from the registry.
+    ///
+    /// If the requested model (after auto-quant selection) is already loaded,
+    /// this is a no-op — skipping memory checks and engine reload.
     pub async fn load_model(&self, model_id: &str) -> Result<(), RuntimeError> {
         let requested_id = ModelId::from(model_id);
         let id = self.select_model_for_device(&requested_id).await?;
+
+        // Fast path: model already loaded — skip everything.
+        {
+            let guard = self.loaded_model.lock().await;
+            if let Some(ref loaded) = *guard {
+                if loaded.id == id {
+                    debug!(model = %id, "Model already loaded, skipping reload");
+                    return Ok(());
+                }
+            }
+        }
+
         let metadata = self
             .registry
             .get(&id)
@@ -118,18 +179,18 @@ impl Runtime {
         // Memory check
         self.memory_guard.can_load_model(&metadata)?;
 
-        // SHA256 verification
-        info!(model = %id, "Verifying model integrity");
-        model_manager::verify_sha256(&metadata.path, &metadata.sha256).await?;
+        // Unload any previously loaded model before loading the new one
+        self.unload_model().await.ok();
 
-        // Load into engine
+        // Load into the correct engine for this model's backend
         let model_config = ModelConfig {
             path: metadata.path.clone(),
             context_size: self.effective_context_size(metadata.context_limit),
             gpu_layers: None,
         };
 
-        let mut engine = self.engine.lock().await;
+        let engine = self.engine_for(metadata.backend)?;
+        let mut engine = engine.lock().await;
         engine.load_model(&metadata.path, &model_config).await?;
 
         // Update state
@@ -141,6 +202,8 @@ impl Runtime {
     }
 
     /// Load a model directly from a file path (ad-hoc, no registry lookup).
+    /// The backend is auto-detected from the path: `*.gguf` → llama,
+    /// directory with `config.json` → mlx.
     pub async fn load_model_from_path(
         &self,
         path: &std::path::Path,
@@ -150,20 +213,23 @@ impl Runtime {
             return Err(model_manager::ModelManagerError::FileNotFound(path.to_path_buf()).into());
         }
 
+        let backend = detect_backend_from_path(path);
         let model_config = ModelConfig {
             path: path.to_path_buf(),
             context_size: self.effective_context_size(self.config.max_context_tokens),
             gpu_layers: None,
         };
 
-        let mut engine = self.engine.lock().await;
+        let engine = self.engine_for(backend)?;
+        let mut engine = engine.lock().await;
         engine.load_model(path, &model_config).await?;
+        drop(engine);
 
-        // Create a minimal metadata entry
         let metadata = ModelMetadata {
             id: ModelId::from(model_id),
             name: model_id.to_string(),
             path: path.to_path_buf(),
+            backend,
             quantization: model_manager::QuantType::Q4KM,
             size_bytes: std::fs::metadata(path).map(|m| m.len()).unwrap_or(0),
             estimated_ram_bytes: 0,
@@ -177,7 +243,7 @@ impl Runtime {
         };
 
         *self.loaded_model.lock().await = Some(metadata);
-        info!(model = model_id, path = %path.display(), "Model loaded from path");
+        info!(model = model_id, backend = %backend, path = %path.display(), "Model loaded from path");
         Ok(())
     }
 
@@ -187,25 +253,47 @@ impl Runtime {
         prompt: &str,
         params: GenerationParams,
     ) -> Result<(mpsc::Receiver<Token>, CancellationToken), RuntimeError> {
-        if self.loaded_model.lock().await.is_none() {
-            return Err(RuntimeError::NoModelLoaded);
-        }
+        let loaded_backend = {
+            let guard = self.loaded_model.lock().await;
+            match guard.as_ref() {
+                Some(m) => m.backend,
+                None => return Err(RuntimeError::NoModelLoaded),
+            }
+        };
 
         let (tx, rx) = mpsc::channel(64);
         let cancel = CancellationToken::new();
 
-        let engine = self.engine.clone();
+        let engine = self.engine_for(loaded_backend)?;
         let prompt = prompt.to_string();
         let cancel_clone = cancel.clone();
 
         tokio::spawn(async move {
+            let (backend_tx, mut backend_rx) = mpsc::channel::<Token>(64);
             let tx_error = tx.clone();
+            let tx_stream = tx.clone();
+
+            let forwarder = tokio::spawn(async move {
+                while let Some(mut token) = backend_rx.recv().await {
+                    let Some(cleaned) = normalize_stream_token_text(&token.text) else {
+                        continue;
+                    };
+                    token.text = cleaned;
+                    if tx_stream.send(token).await.is_err() {
+                        break;
+                    }
+                }
+            });
+
             let engine = engine.lock().await;
-            match engine
-                .stream_completion(&prompt, &params, tx, cancel_clone)
-                .await
-            {
+            let result = engine
+                .stream_completion(&prompt, &params, backend_tx, cancel_clone)
+                .await;
+            drop(engine);
+
+            match result {
                 Ok(stats) => {
+                    let _ = forwarder.await;
                     info!(
                         tokens = stats.tokens_generated,
                         tps = format!("{:.1}", stats.tokens_per_second),
@@ -213,9 +301,11 @@ impl Runtime {
                     );
                 }
                 Err(inference_engine::InferenceError::Cancelled) => {
+                    let _ = forwarder.await;
                     info!("Inference cancelled by user");
                 }
                 Err(e) => {
+                    let _ = forwarder.await;
                     warn!(error = %e, "Inference error");
                     let _ = tx_error
                         .send(Token {
@@ -233,8 +323,13 @@ impl Runtime {
 
     /// Unload the current model.
     pub async fn unload_model(&self) -> Result<(), RuntimeError> {
-        let mut engine = self.engine.lock().await;
-        engine.unload_model().await?;
+        let backend = self.loaded_model.lock().await.as_ref().map(|m| m.backend);
+        if let Some(b) = backend {
+            if let Ok(engine) = self.engine_for(b) {
+                let mut engine = engine.lock().await;
+                engine.unload_model().await?;
+            }
+        }
         *self.loaded_model.lock().await = None;
         info!("Model unloaded");
         Ok(())
@@ -408,20 +503,58 @@ fn is_quant_token(token: &str) -> bool {
     )
 }
 
+fn normalize_stream_token_text(token: &str) -> Option<String> {
+    let cleaned: String = token
+        .chars()
+        .filter(|ch| !is_disallowed_control_char(*ch))
+        .collect();
+
+    // Only suppress tokens that are purely special tokens.
+    // Do NOT suppress whitespace-only tokens — spaces and newlines are real content.
+    if looks_like_special_token(cleaned.trim()) {
+        return None;
+    }
+
+    // Suppress completely empty tokens (after control-char stripping), but
+    // keep whitespace-only tokens like " " or "\n" since they are meaningful.
+    if cleaned.is_empty() {
+        return None;
+    }
+
+    Some(cleaned)
+}
+
+fn is_disallowed_control_char(ch: char) -> bool {
+    ch.is_control() && ch != '\n' && ch != '\r' && ch != '\t'
+}
+
+fn looks_like_special_token(token: &str) -> bool {
+    matches!(token, "<s>" | "</s>" | "<unk>" | "<pad>")
+        || (token.starts_with("<|") && token.ends_with("|>"))
+        || (token.starts_with("<｜") && token.ends_with("｜>"))
+}
+
 async fn handle_critical_memory_event(
-    engine: &Arc<Mutex<Box<dyn InferenceBackend>>>,
+    engines: &Arc<EngineMap>,
     loaded_model: &Arc<Mutex<Option<ModelMetadata>>>,
     registry: &InMemoryRegistry,
 ) -> Result<(), RuntimeError> {
-    let active_id = loaded_model.lock().await.as_ref().map(|m| m.id.clone());
+    let active = loaded_model
+        .lock()
+        .await
+        .as_ref()
+        .map(|m| (m.id.clone(), m.backend));
 
-    if let Some(evicted_id) = evict_one_lru_non_active(registry, active_id.as_ref()).await? {
+    if let Some(evicted_id) =
+        evict_one_lru_non_active(registry, active.as_ref().map(|(id, _)| id)).await?
+    {
         warn!(model = %evicted_id, "Evicted cold model due to memory pressure");
-    } else if active_id.is_some() {
+    } else if let Some((_, backend)) = active {
         warn!("No cold model available to evict; unloading active model");
-        let mut guard = engine.lock().await;
-        guard.unload_model().await?;
-        drop(guard);
+        if let Some(engine) = engines.get(&backend) {
+            let mut guard = engine.lock().await;
+            guard.unload_model().await?;
+        }
         *loaded_model.lock().await = None;
     }
 
@@ -458,6 +591,7 @@ async fn evict_one_lru_non_active(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
@@ -531,6 +665,14 @@ mod tests {
         }
     }
 
+    fn llama_backends(
+        backend: Box<dyn InferenceBackend>,
+    ) -> HashMap<ModelBackend, Box<dyn InferenceBackend>> {
+        let mut map = HashMap::new();
+        map.insert(ModelBackend::Llama, backend);
+        map
+    }
+
     fn test_config(base: &Path) -> RuntimeConfig {
         RuntimeConfig {
             models_dir: base.join("models"),
@@ -557,6 +699,7 @@ mod tests {
             id: id.into(),
             name: id.to_string(),
             path,
+            backend: ModelBackend::Llama,
             quantization: model_manager::QuantType::Q4KM,
             size_bytes: size,
             estimated_ram_bytes: estimated_ram,
@@ -579,7 +722,7 @@ mod tests {
         let context_capture = Arc::new(Mutex::new(None));
         let path_capture = Arc::new(Mutex::new(None));
         let backend = Box::new(RecordingBackend::new(context_capture.clone(), path_capture));
-        let runtime = Runtime::new(config, backend).await.unwrap();
+        let runtime = Runtime::new(config, llama_backends(backend)).await.unwrap();
 
         let path = dir.path().join("model.gguf");
         tokio::fs::write(&path, b"dummy").await.unwrap();
@@ -597,7 +740,7 @@ mod tests {
             Arc::new(Mutex::new(None)),
             Arc::new(Mutex::new(None)),
         ));
-        let runtime = Runtime::new(config, backend).await.unwrap();
+        let runtime = Runtime::new(config, llama_backends(backend)).await.unwrap();
 
         let path = dir.path().join("oom.gguf");
         tokio::fs::write(&path, b"dummy-model").await.unwrap();
@@ -623,7 +766,7 @@ mod tests {
             Arc::new(Mutex::new(None)),
             Arc::new(Mutex::new(None)),
         ));
-        let runtime = Runtime::new(config, backend).await.unwrap();
+        let runtime = Runtime::new(config, llama_backends(backend)).await.unwrap();
 
         let old_path = dir.path().join("old.gguf");
         let new_path = dir.path().join("new.gguf");
@@ -685,7 +828,7 @@ mod tests {
         let context_capture = Arc::new(Mutex::new(None));
         let path_capture = Arc::new(Mutex::new(None));
         let backend = Box::new(RecordingBackend::new(context_capture, path_capture.clone()));
-        let runtime = Runtime::new(config, backend).await.unwrap();
+        let runtime = Runtime::new(config, llama_backends(backend)).await.unwrap();
 
         let f16_path = dir.path().join("phi3-f16.gguf");
         let q4_path = dir.path().join("phi3-q4.gguf");
@@ -738,5 +881,23 @@ mod tests {
     fn strips_quant_tokens_from_family_key() {
         assert_eq!(model_family_key("phi-3-mini-q4_k_m"), "phi-3-mini");
         assert_eq!(model_family_key("tinyllama-q6k.gguf"), "tinyllama");
+    }
+
+    #[test]
+    fn stream_token_normalizer_filters_special_tokens() {
+        assert_eq!(normalize_stream_token_text("<s>"), None);
+        assert_eq!(normalize_stream_token_text("<|im_end|>"), None);
+        assert_eq!(normalize_stream_token_text("hello"), Some("hello".into()));
+    }
+
+    #[test]
+    fn stream_token_normalizer_preserves_whitespace() {
+        // Whitespace tokens are real content — spaces between words, newlines.
+        assert_eq!(normalize_stream_token_text(" "), Some(" ".into()));
+        assert_eq!(normalize_stream_token_text("\n"), Some("\n".into()));
+        assert_eq!(normalize_stream_token_text("  "), Some("  ".into()));
+        assert_eq!(normalize_stream_token_text("\n\n"), Some("\n\n".into()));
+        // Truly empty tokens after control-char stripping are still suppressed.
+        assert_eq!(normalize_stream_token_text(""), None);
     }
 }

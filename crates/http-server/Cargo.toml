@@ -4,10 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["mock-backend"]
+default = []
 llama-backend = ["runtime-core/llama-backend", "inference-engine/llama-backend"]
-mlx-backend = ["runtime-core/mlx-backend", "inference-engine/mlx-backend"]
-mock-backend = ["runtime-core/mock-backend", "inference-engine/mock-backend"]
 
 [dependencies]
 runtime-core = { workspace = true, default-features = false }
@@ -28,6 +26,8 @@ chrono = { workspace = true }
 tower-http = { workspace = true }
 
 [dev-dependencies]
+async-trait = { workspace = true }
+inference-engine = { workspace = true, default-features = false }
 reqwest = { workspace = true }
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }

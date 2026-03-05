@@ -7,21 +7,11 @@ edition = "2021"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
-default = ["mock-backend"]
+default = []
 llama-backend = [
     "runtime-core/llama-backend",
     "inference-engine/llama-backend",
     "device-profiler/llama-backend",
-]
-mlx-backend = [
-    "runtime-core/mlx-backend",
-    "inference-engine/mlx-backend",
-    "device-profiler/mlx-backend",
-]
-mock-backend = [
-    "runtime-core/mock-backend",
-    "inference-engine/mock-backend",
-    "device-profiler/mock-backend",
 ]
 
 [dependencies]

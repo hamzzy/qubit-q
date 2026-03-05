@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:developer' as developer;
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:path_provider/path_provider.dart';
 
 import 'http_runtime.dart';
 import 'mai_runtime.dart';
@@ -10,6 +12,10 @@ import 'models.dart';
 enum ConnectionMode { ffi, http, disconnected }
 
 class RuntimeController extends ChangeNotifier {
+  static final RegExp _specialTokenPattern = RegExp(
+    r'^\s*(<\|[^|]+?\|>|<｜[^｜]+｜>|<[^>\s]{1,48}>)\s*$',
+  );
+
   RuntimeController({
     this.httpBaseUrl = 'http://localhost:11434',
   }) {
@@ -21,6 +27,7 @@ class RuntimeController extends ChangeNotifier {
   MaiRuntime? _runtime;
   HttpMaiRuntime? _httpRuntime;
   StreamSubscription<String>? _streamSubscription;
+  StreamSubscription<EventUpdate>? _eventSubscription;
   Timer? _pollTimer;
   Duration? _pollInterval;
 
@@ -43,6 +50,11 @@ class RuntimeController extends ChangeNotifier {
   List<DownloadJob> downloads = const <DownloadJob>[];
   String systemPrompt = '';
   double temperature = 0.7;
+  double topP = 0.9;
+  int topK = 40;
+  double repeatPenalty = 1.1;
+  int maxOutputTokens = 256;
+  int? generationSeed;
   int contextWindow = 2048;
   bool preferAccelerator = true;
   bool thermalGuardEnabled = true;
@@ -87,8 +99,7 @@ class RuntimeController extends ChangeNotifier {
     final message = '$context: $error';
     final stack = stackTrace == null ? '' : '\n$stackTrace';
     lastError = message;
-    lastErrorDetails =
-        '[${DateTime.now().toIso8601String()}] $message$stack';
+    lastErrorDetails = '[${DateTime.now().toIso8601String()}] $message$stack';
     _appendDebug('error', lastErrorDetails!);
   }
 
@@ -138,20 +149,40 @@ class RuntimeController extends ChangeNotifier {
     _safeNotify();
   }
 
-  Future<MaiRuntime> _createPreferredFfiRuntime() async {
-    if (defaultTargetPlatform != TargetPlatform.iOS) {
-      return MaiRuntime.create();
+  /// Build a runtime config with paths that are writable inside the iOS/Android
+  /// app sandbox.  On desktop/macOS the Rust default (~/.mai) is fine.
+  Future<Map<String, dynamic>?> _buildRuntimeConfig() async {
+    if (!Platform.isIOS && !Platform.isAndroid) {
+      return null; // use Rust defaults
     }
 
     try {
-      _appendDebug('info', 'Trying iOS MLX backend');
-      return await MaiRuntime.create(config: <String, dynamic>{
-        'backend_preference': 'mlx',
-      });
+      // Documents dir survives backups on iOS; Library/Application Support is
+      // the right place for non-user-visible data, but requires entitlements on
+      // some iOS versions.  Documents is safe for both.
+      final docsDir = await getApplicationDocumentsDirectory();
+      final supportDir = await getApplicationSupportDirectory();
+
+      final modelsDir = Directory('${docsDir.path}/mai/models');
+      final cacheDir = Directory('${supportDir.path}/mai/cache');
+      final logsDir = Directory('${supportDir.path}/mai/logs');
+
+      // Keys must match the flattened PartialRuntimeConfig field names.
+      return <String, dynamic>{
+        'models_dir': modelsDir.path,
+        'cache_dir': cacheDir.path,
+        'logs_dir': logsDir.path,
+      };
     } catch (e) {
-      _appendDebug('warn', 'MLX backend unavailable, falling back to auto backend: $e');
-      return MaiRuntime.create();
+      _appendDebug('warn', 'Could not resolve app directories: $e');
+      return null;
     }
+  }
+
+  Future<MaiRuntime> _createPreferredFfiRuntime() async {
+    final config = await _buildRuntimeConfig();
+    _appendDebug('info', 'FFI runtime config: $config');
+    return MaiRuntime.create(config: config);
   }
 
   String _connectionErrorMessage(Object? ffiError, Object? httpError) {
@@ -159,7 +190,8 @@ class RuntimeController extends ChangeNotifier {
       return 'Cannot connect. Run `mai serve` to start the runtime server.';
     }
 
-    final httpDetail = httpError == null ? 'HTTP endpoint not reachable' : '$httpError';
+    final httpDetail =
+        httpError == null ? 'HTTP endpoint not reachable' : '$httpError';
     return 'Native runtime init failed: $ffiError\n'
         'HTTP fallback also failed: $httpDetail\n'
         'Run `mai serve` for HTTP mode, or fix iOS FFI linking.';
@@ -246,7 +278,8 @@ class RuntimeController extends ChangeNotifier {
     hubSearchLoading = true;
     _safeNotify();
     try {
-      final request = HubSearchRequest(query: hubSearchQuery, limit: 80, onlyGguf: true);
+      final request =
+          HubSearchRequest(query: hubSearchQuery, limit: 80, onlyGguf: true);
       if (_hasFfi) {
         hubModels = await _runtime!.searchHubModels(request);
       } else if (_hasHttp) {
@@ -337,12 +370,30 @@ class RuntimeController extends ChangeNotifier {
 
       MaiCompletion completion;
       if (_hasFfi) {
-        completion = await _runtime!.streamCompletion(effectivePrompt);
+        completion = await _runtime!.streamCompletion(
+          effectivePrompt,
+          options: GenerationOptions(
+            maxTokens: maxOutputTokens,
+            temperature: temperature,
+            topP: topP,
+            topK: topK,
+            repeatPenalty: repeatPenalty,
+            seed: generationSeed,
+          ),
+        );
       } else if (_hasHttp) {
         loadedModelId = selectedModelId;
         completion = await _httpRuntime!.streamCompletion(
           effectivePrompt,
           modelId: selectedModelId,
+          options: GenerationOptions(
+            maxTokens: maxOutputTokens,
+            temperature: temperature,
+            topP: topP,
+            topK: topK,
+            repeatPenalty: repeatPenalty,
+            seed: generationSeed,
+          ),
         );
       } else {
         throw MaiRuntimeException(-3, 'No runtime available');
@@ -354,7 +405,11 @@ class RuntimeController extends ChangeNotifier {
       await _streamSubscription?.cancel();
       _streamSubscription = completion.stream.listen(
         (token) {
-          lastResponse = '$lastResponse$token';
+          final cleanToken = _sanitizeDisplayToken(token);
+          if (cleanToken.isEmpty) {
+            return;
+          }
+          lastResponse = '$lastResponse$cleanToken';
           _safeNotify();
         },
         onError: (Object err, StackTrace st) {
@@ -428,9 +483,10 @@ class RuntimeController extends ChangeNotifier {
   }
 
   Future<void> downloadHubFile(HubModel model, HubModelFile file) async {
-    final quant = (file.quantization == null || file.quantization!.trim().isEmpty)
-        ? 'Q4_K_M'
-        : file.quantization!;
+    final quant =
+        (file.quantization == null || file.quantization!.trim().isEmpty)
+            ? 'Q4_K_M'
+            : file.quantization!;
     final request = DownloadRequest(
       sourcePath: null,
       sourceUrl: file.downloadUrl,
@@ -438,6 +494,7 @@ class RuntimeController extends ChangeNotifier {
       id: model.id,
       name: model.id,
       quant: quant,
+      backend: file.isMlx ? 'mlx' : 'llama',
     );
     await startDownload(request);
   }
@@ -505,14 +562,16 @@ class RuntimeController extends ChangeNotifier {
   }
 
   List<String> get availableModelIds {
-    final ids = <String>{selectedModelId};
-    for (final model in catalog) {
-      ids.add(model.id);
-    }
+    // Only show models that have been successfully downloaded.
+    final ids = <String>{};
     for (final job in downloads) {
       if (job.status == 'succeeded') {
         ids.add(job.modelId);
       }
+    }
+    // Always include the selected model so the dropdown doesn't break.
+    if (ids.isEmpty) {
+      ids.add(selectedModelId);
     }
     final list = ids.toList(growable: false)..sort();
     return list;
@@ -559,6 +618,31 @@ class RuntimeController extends ChangeNotifier {
     _safeNotify();
   }
 
+  void setTopP(double value) {
+    topP = value;
+    _safeNotify();
+  }
+
+  void setTopK(int value) {
+    topK = value;
+    _safeNotify();
+  }
+
+  void setRepeatPenalty(double value) {
+    repeatPenalty = value;
+    _safeNotify();
+  }
+
+  void setMaxOutputTokens(int value) {
+    maxOutputTokens = value;
+    _safeNotify();
+  }
+
+  void setGenerationSeed(int? value) {
+    generationSeed = value;
+    _safeNotify();
+  }
+
   void setPreferAccelerator(bool value) {
     preferAccelerator = value;
     _safeNotify();
@@ -574,14 +658,34 @@ class RuntimeController extends ChangeNotifier {
     _safeNotify();
   }
 
-  // ── Polling ───────────────────────────────────────────────────────────────
+  String _sanitizeDisplayToken(String token) {
+    final cleaned = token.replaceAll(
+      RegExp(r'[\x00-\x08\x0B\x0C\x0E-\x1F]'),
+      '',
+    );
+    if (_specialTokenPattern.hasMatch(cleaned)) {
+      return '';
+    }
+    return cleaned;
+  }
+
+  // ── Event stream / Polling ────────────────────────────────────────────────
 
   void _ensurePolling() {
+    // In HTTP mode, use SSE push instead of polling.
+    if (_hasHttp && _eventSubscription == null) {
+      _startEventStream();
+      return;
+    }
+
+    // FFI mode: fall back to timer-based polling.
     final interval = hasActiveDownloads
         ? const Duration(seconds: 1)
         : const Duration(seconds: 5);
 
-    if (_pollTimer != null && _pollTimer!.isActive && _pollInterval == interval) {
+    if (_pollTimer != null &&
+        _pollTimer!.isActive &&
+        _pollInterval == interval) {
       return;
     }
 
@@ -591,6 +695,47 @@ class RuntimeController extends ChangeNotifier {
     _pollTimer = Timer.periodic(interval, (_) async {
       if (!initialized) return;
 
+      try {
+        await refreshDownloads();
+        await refreshMetrics();
+      } catch (e, st) {
+        _setError('Polling failed', e, st);
+        _safeNotify();
+      }
+    });
+  }
+
+  void _startEventStream() {
+    _eventSubscription?.cancel();
+    _eventSubscription = _httpRuntime!.eventStream().listen(
+      (update) {
+        downloads = update.downloads;
+        _safeNotify();
+      },
+      onError: (Object err) {
+        _appendDebug('warn', 'Event stream error: $err, falling back to polling');
+        _eventSubscription = null;
+        // Fall back to polling on SSE failure.
+        _startFallbackPolling();
+      },
+      onDone: () {
+        _appendDebug('info', 'Event stream closed, reconnecting...');
+        _eventSubscription = null;
+        // Reconnect after a short delay.
+        Future<void>.delayed(const Duration(seconds: 2), () {
+          if (initialized && !_disposed && _hasHttp) {
+            _startEventStream();
+          }
+        });
+      },
+    );
+  }
+
+  void _startFallbackPolling() {
+    _pollTimer?.cancel();
+    _pollInterval = const Duration(seconds: 3);
+    _pollTimer = Timer.periodic(_pollInterval!, (_) async {
+      if (!initialized) return;
       try {
         await refreshDownloads();
         await refreshMetrics();
@@ -612,6 +757,9 @@ class RuntimeController extends ChangeNotifier {
 
     unawaited(_streamSubscription?.cancel());
     _streamSubscription = null;
+
+    unawaited(_eventSubscription?.cancel());
+    _eventSubscription = null;
 
     _runtime?.dispose();
     _runtime = null;

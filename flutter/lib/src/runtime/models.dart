@@ -47,7 +47,8 @@ class DeviceProfile {
       batteryLevel: (json['battery_level'] as num?)?.toDouble(),
       isCharging: json['is_charging'] as bool,
       availableStorageBytes: (json['available_storage_bytes'] as num).toInt(),
-      benchmarkTokensPerSec: (json['benchmark_tokens_per_sec'] as num?)?.toDouble(),
+      benchmarkTokensPerSec:
+          (json['benchmark_tokens_per_sec'] as num?)?.toDouble(),
     );
   }
 }
@@ -59,6 +60,7 @@ class DownloadRequest {
   final String id;
   final String name;
   final String quant;
+  final String? backend;
 
   DownloadRequest({
     required this.sourcePath,
@@ -67,6 +69,7 @@ class DownloadRequest {
     required this.id,
     required this.name,
     required this.quant,
+    this.backend,
   });
 
   bool get hasExactlyOneSource {
@@ -92,6 +95,9 @@ class DownloadRequest {
     if (destinationPath != null && destinationPath!.trim().isNotEmpty) {
       json['destination_path'] = destinationPath;
     }
+    if (backend != null && backend!.trim().isNotEmpty) {
+      json['backend'] = backend;
+    }
     return json;
   }
 }
@@ -103,6 +109,8 @@ class CatalogModel {
   final String quantization;
   final int? sizeBytes;
   final int? minRamBytes;
+  /// 'llama' (GGUF via llama.cpp) or 'mlx' (Apple Silicon safetensors)
+  final String backend;
 
   CatalogModel({
     required this.id,
@@ -111,7 +119,10 @@ class CatalogModel {
     required this.quantization,
     required this.sizeBytes,
     required this.minRamBytes,
+    this.backend = 'llama',
   });
+
+  bool get isMlx => backend == 'mlx';
 
   factory CatalogModel.fromJson(Map<String, dynamic> json) {
     return CatalogModel(
@@ -121,6 +132,7 @@ class CatalogModel {
       quantization: (json['quantization'] as String?) ?? 'Q4KM',
       sizeBytes: (json['size_bytes'] as num?)?.toInt(),
       minRamBytes: (json['min_ram_bytes'] as num?)?.toInt(),
+      backend: (json['backend'] as String?) ?? 'llama',
     );
   }
 }
@@ -163,13 +175,18 @@ class HubModelFile {
   final int? sizeBytes;
   final String downloadUrl;
   final String? quantization;
+  /// 'llama' or 'mlx' — tells the runtime which backend to use after download.
+  final String backend;
 
   HubModelFile({
     required this.filename,
     required this.sizeBytes,
     required this.downloadUrl,
     required this.quantization,
+    this.backend = 'llama',
   });
+
+  bool get isMlx => backend == 'mlx';
 
   factory HubModelFile.fromJson(Map<String, dynamic> json) {
     return HubModelFile(
@@ -177,6 +194,7 @@ class HubModelFile {
       sizeBytes: (json['size_bytes'] as num?)?.toInt(),
       downloadUrl: json['download_url'] as String,
       quantization: json['quantization'] as String?,
+      backend: (json['backend'] as String?) ?? 'llama',
     );
   }
 }
@@ -186,6 +204,7 @@ class HubModel {
   final int downloads;
   final int likes;
   final List<String> tags;
+  /// All downloadable variants for this model (GGUF quants and/or MLX).
   final List<HubModelFile> ggufFiles;
 
   HubModel({
@@ -301,7 +320,8 @@ class RuntimeMetrics {
       inferenceErrorsTotal: (json['inference_errors_total'] as num).toInt(),
       activeStreams: (json['active_streams'] as num).toInt(),
       downloadsStartedTotal: (json['downloads_started_total'] as num).toInt(),
-      downloadsCompletedTotal: (json['downloads_completed_total'] as num).toInt(),
+      downloadsCompletedTotal:
+          (json['downloads_completed_total'] as num).toInt(),
       downloadsFailedTotal: (json['downloads_failed_total'] as num).toInt(),
       downloadsActive: (json['downloads_active'] as num).toInt(),
       downloadBytesTotal: (json['download_bytes_total'] as num).toInt(),
@@ -311,9 +331,65 @@ class RuntimeMetrics {
   }
 }
 
+/// Pushed via the SSE `/v1/events` endpoint.
+class EventUpdate {
+  final List<DownloadJob> downloads;
+  final bool hasActiveDownloads;
+
+  EventUpdate({
+    required this.downloads,
+    required this.hasActiveDownloads,
+  });
+
+  factory EventUpdate.fromJson(Map<String, dynamic> json) {
+    final downloadsRaw =
+        (json['downloads'] as List<dynamic>? ?? const <dynamic>[])
+            .cast<Map<String, dynamic>>();
+    return EventUpdate(
+      downloads: downloadsRaw.map(DownloadJob.fromJson).toList(growable: false),
+      hasActiveDownloads: json['has_active_downloads'] as bool? ?? false,
+    );
+  }
+}
+
 class MaiCompletion {
   final int completionId;
   final Stream<String> stream;
 
   MaiCompletion({required this.completionId, required this.stream});
+}
+
+class GenerationOptions {
+  final int maxTokens;
+  final double temperature;
+  final double topP;
+  final int topK;
+  final double repeatPenalty;
+  final List<String> stopSequences;
+  final int? seed;
+  final bool stream;
+
+  const GenerationOptions({
+    this.maxTokens = 256,
+    this.temperature = 0.7,
+    this.topP = 0.9,
+    this.topK = 40,
+    this.repeatPenalty = 1.1,
+    this.stopSequences = const <String>[],
+    this.seed,
+    this.stream = true,
+  });
+
+  Map<String, dynamic> toJson() {
+    return <String, dynamic>{
+      'max_tokens': maxTokens,
+      'temperature': temperature,
+      'top_p': topP,
+      'top_k': topK,
+      'repeat_penalty': repeatPenalty,
+      'stop_sequences': stopSequences,
+      'seed': seed,
+      'stream': stream,
+    };
+  }
 }

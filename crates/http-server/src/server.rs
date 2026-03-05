@@ -5,8 +5,7 @@ use axum_server::tls_rustls::RustlsConfig;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
-use inference_engine::InferenceBackend;
-use runtime_core::{Runtime, RuntimeConfig};
+use runtime_core::{Runtime, RuntimeConfig, create_backends};
 
 use crate::config::ServerConfig;
 use crate::error::HttpServerError;
@@ -39,6 +38,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/v1/models/hub/search", post(routes::models::hub_search))
         .route("/v1/chat/completions", post(routes::chat::chat_completion))
         .route("/v1/embeddings", post(routes::embeddings::create_embedding))
+        .route("/v1/events", get(routes::events::event_stream))
         .route("/ui/models", get(routes::ui::models_page))
         .route("/health", get(routes::health::health_check))
         .route("/metrics", get(routes::metrics::prometheus_metrics))
@@ -60,8 +60,8 @@ pub async fn run_server(
         ));
     }
 
-    let backend = create_backend().map_err(HttpServerError::Internal)?;
-    let runtime = Runtime::new(runtime_config, backend)
+    let backends = create_backends().map_err(HttpServerError::Internal)?;
+    let runtime = Runtime::new(runtime_config, backends)
         .await
         .map_err(|e| HttpServerError::Internal(e.to_string()))?;
     let state = AppState::new(runtime, config.api_key.clone());
@@ -102,85 +102,57 @@ pub async fn run_server(
     }
 }
 
-fn create_backend() -> Result<Box<dyn InferenceBackend>, String> {
-    let requested = std::env::var("MAI_BACKEND")
-        .ok()
-        .map(|v| v.trim().to_ascii_lowercase())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "auto".to_string());
-
-    match requested.as_str() {
-        "auto" => create_backend_auto(),
-        "mlx" => create_backend_mlx(),
-        "llama" => create_backend_llama(),
-        "mock" => create_backend_mock(),
-        other => Err(format!(
-            "Unknown MAI_BACKEND='{other}'. Supported values: auto, mlx, llama, mock"
-        )),
-    }
-}
-
-fn create_backend_auto() -> Result<Box<dyn InferenceBackend>, String> {
-    #[cfg(all(feature = "mlx-backend", target_os = "ios"))]
-    {
-        return create_backend_mlx();
-    }
-
-    #[cfg(feature = "llama-backend")]
-    {
-        return create_backend_llama();
-    }
-
-    #[cfg(feature = "mock-backend")]
-    {
-        return create_backend_mock();
-    }
-
-    #[allow(unreachable_code)]
-    Err("No inference backend enabled. Build with mock-backend|llama-backend|mlx-backend".into())
-}
-
-#[cfg(feature = "mlx-backend")]
-fn create_backend_mlx() -> Result<Box<dyn InferenceBackend>, String> {
-    Ok(Box::new(inference_engine::mlx_backend::MlxBackend::new()))
-}
-
-#[cfg(not(feature = "mlx-backend"))]
-fn create_backend_mlx() -> Result<Box<dyn InferenceBackend>, String> {
-    Err("MLX backend requested but this binary was built without 'mlx-backend'".into())
-}
-
-#[cfg(feature = "llama-backend")]
-fn create_backend_llama() -> Result<Box<dyn InferenceBackend>, String> {
-    let backend =
-        inference_engine::llama_backend::LlamaBackendWrapper::new().map_err(|e| e.to_string())?;
-    Ok(Box::new(backend))
-}
-
-#[cfg(not(feature = "llama-backend"))]
-fn create_backend_llama() -> Result<Box<dyn InferenceBackend>, String> {
-    Err("llama backend requested but this binary was built without 'llama-backend'".into())
-}
-
-#[cfg(feature = "mock-backend")]
-fn create_backend_mock() -> Result<Box<dyn InferenceBackend>, String> {
-    Ok(Box::new(inference_engine::mock_backend::MockBackend::new()))
-}
-
-#[cfg(not(feature = "mock-backend"))]
-fn create_backend_mock() -> Result<Box<dyn InferenceBackend>, String> {
-    Err("mock backend requested but this binary was built without 'mock-backend'".into())
-}
-
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use axum::body::{to_bytes, Body};
     use axum::http::{header, Method, Request, StatusCode};
-    use model_manager::{ModelId, ModelMetadata, ModelRegistry, QuantType};
+    use inference_engine::InferenceBackend;
+    use model_manager::{ModelBackend, ModelId, ModelMetadata, ModelRegistry, QuantType};
     use runtime_core::RuntimeConfig;
     use tower::ServiceExt;
 
     use super::*;
+
+    /// No-op backend for tests — never loads a model or generates tokens.
+    struct NoOpBackend;
+
+    #[async_trait::async_trait]
+    impl InferenceBackend for NoOpBackend {
+        async fn load_model(
+            &mut self,
+            _path: &std::path::Path,
+            _config: &inference_engine::ModelConfig,
+        ) -> Result<(), inference_engine::InferenceError> {
+            Ok(())
+        }
+        async fn unload_model(&mut self) -> Result<(), inference_engine::InferenceError> {
+            Ok(())
+        }
+        async fn stream_completion(
+            &self,
+            _prompt: &str,
+            _params: &model_manager::GenerationParams,
+            _tx: tokio::sync::mpsc::Sender<inference_engine::Token>,
+            _cancel: tokio_util::sync::CancellationToken,
+        ) -> Result<inference_engine::CompletionStats, inference_engine::InferenceError> {
+            Ok(inference_engine::CompletionStats {
+                tokens_generated: 0,
+                tokens_per_second: 0.0,
+                prompt_tokens: 0,
+                total_duration_ms: 0,
+            })
+        }
+        fn memory_usage_bytes(&self) -> u64 { 0 }
+        fn is_loaded(&self) -> bool { false }
+    }
+
+    fn mock_backends() -> HashMap<ModelBackend, Box<dyn InferenceBackend>> {
+        let mut map: HashMap<ModelBackend, Box<dyn InferenceBackend>> = HashMap::new();
+        map.insert(ModelBackend::Llama, Box::new(NoOpBackend));
+        map
+    }
 
     fn test_runtime_config(base: &std::path::Path) -> RuntimeConfig {
         RuntimeConfig {
@@ -199,12 +171,9 @@ mod tests {
     #[tokio::test]
     async fn health_is_public_even_with_api_key() {
         let dir = tempfile::tempdir().unwrap();
-        let runtime = Runtime::new(
-            test_runtime_config(dir.path()),
-            Box::new(inference_engine::mock_backend::MockBackend::new()),
-        )
-        .await
-        .unwrap();
+        let runtime = Runtime::new(test_runtime_config(dir.path()), mock_backends())
+            .await
+            .unwrap();
         let app = create_router(AppState::new(runtime, Some("secret".into())));
 
         let response = app
@@ -222,12 +191,9 @@ mod tests {
     #[tokio::test]
     async fn metrics_requires_bearer_token_when_configured() {
         let dir = tempfile::tempdir().unwrap();
-        let runtime = Runtime::new(
-            test_runtime_config(dir.path()),
-            Box::new(inference_engine::mock_backend::MockBackend::new()),
-        )
-        .await
-        .unwrap();
+        let runtime = Runtime::new(test_runtime_config(dir.path()), mock_backends())
+            .await
+            .unwrap();
         let app = create_router(AppState::new(runtime, Some("secret".into())));
 
         let unauthorized = app
@@ -258,12 +224,9 @@ mod tests {
     #[tokio::test]
     async fn list_models_returns_registered_entries() {
         let dir = tempfile::tempdir().unwrap();
-        let runtime = Runtime::new(
-            test_runtime_config(dir.path()),
-            Box::new(inference_engine::mock_backend::MockBackend::new()),
-        )
-        .await
-        .unwrap();
+        let runtime = Runtime::new(test_runtime_config(dir.path()), mock_backends())
+            .await
+            .unwrap();
 
         let model_path = dir.path().join("test.gguf");
         tokio::fs::write(&model_path, b"dummy").await.unwrap();
@@ -275,6 +238,7 @@ mod tests {
                 id: ModelId::from("tiny"),
                 name: "Tiny".into(),
                 path: model_path,
+                backend: model_manager::ModelBackend::Llama,
                 quantization: QuantType::Q4KM,
                 size_bytes: 5,
                 estimated_ram_bytes: 10,
@@ -312,12 +276,9 @@ mod tests {
     #[tokio::test]
     async fn download_job_progress_endpoint_reaches_success() {
         let dir = tempfile::tempdir().unwrap();
-        let runtime = Runtime::new(
-            test_runtime_config(dir.path()),
-            Box::new(inference_engine::mock_backend::MockBackend::new()),
-        )
-        .await
-        .unwrap();
+        let runtime = Runtime::new(test_runtime_config(dir.path()), mock_backends())
+            .await
+            .unwrap();
         let app = create_router(AppState::new(runtime, None));
 
         let source = dir.path().join("source.gguf");

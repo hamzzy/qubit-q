@@ -45,7 +45,8 @@ class _ModelsPageState extends ConsumerState<ModelsPage> {
           // Section header
           Row(
             children: [
-              const Icon(Icons.hub_rounded, size: 22, color: LuminaColors.accent),
+              const Icon(Icons.hub_rounded,
+                  size: 22, color: LuminaColors.accent),
               const SizedBox(width: 10),
               Text('Model Hub', style: Theme.of(context).textTheme.titleLarge),
             ],
@@ -82,9 +83,11 @@ class _ModelsPageState extends ConsumerState<ModelsPage> {
               ),
               const SizedBox(width: 8),
               FilledButton(
-                onPressed: () => runtime.searchHubModels(_searchController.text),
+                onPressed: () =>
+                    runtime.searchHubModels(_searchController.text),
                 style: FilledButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
                 ),
                 child: const Icon(Icons.search_rounded, size: 20),
               ),
@@ -104,16 +107,20 @@ class _ModelsPageState extends ConsumerState<ModelsPage> {
                 child: const Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Icon(Icons.verified_rounded, size: 13, color: LuminaColors.emerald),
+                    Icon(Icons.verified_rounded,
+                        size: 13, color: LuminaColors.emerald),
                     SizedBox(width: 4),
-                    Text('GGUF only', style: TextStyle(fontSize: 11, color: LuminaColors.emerald)),
+                    Text('GGUF + MLX',
+                        style: TextStyle(
+                            fontSize: 11, color: LuminaColors.emerald)),
                   ],
                 ),
               ),
               const Spacer(),
               Text(
                 '${runtime.hubModels.length} models',
-                style: const TextStyle(fontSize: 12, color: LuminaColors.white60),
+                style:
+                    const TextStyle(fontSize: 12, color: LuminaColors.white60),
               ),
             ],
           ),
@@ -149,9 +156,11 @@ class _ModelsPageState extends ConsumerState<ModelsPage> {
           const SizedBox(height: 8),
           Row(
             children: [
-              const Icon(Icons.folder_rounded, size: 18, color: LuminaColors.white60),
+              const Icon(Icons.folder_rounded,
+                  size: 18, color: LuminaColors.white60),
               const SizedBox(width: 8),
-              Text('Downloaded / Curated', style: Theme.of(context).textTheme.titleMedium),
+              Text('Downloaded / Curated',
+                  style: Theme.of(context).textTheme.titleMedium),
             ],
           ),
           const SizedBox(height: 10),
@@ -174,15 +183,20 @@ class _ModelsPageState extends ConsumerState<ModelsPage> {
                       color: LuminaColors.accent.withValues(alpha: 0.12),
                       borderRadius: BorderRadius.circular(10),
                     ),
-                    child: const Icon(Icons.smart_toy_rounded, size: 20, color: LuminaColors.accentLight),
+                    child: const Icon(Icons.smart_toy_rounded,
+                        size: 20, color: LuminaColors.accentLight),
                   ),
-                  title: Text(model.name, style: const TextStyle(fontWeight: FontWeight.w600)),
+                  title: Text(model.name,
+                      style: const TextStyle(fontWeight: FontWeight.w600)),
                   subtitle: Text(
-                    '${model.id} \u00b7 ${model.quantization}',
-                    style: const TextStyle(fontSize: 12, color: LuminaColors.white60),
+                    '${model.id} \u00b7 ${model.quantization} \u00b7 ${model.backend.toUpperCase()}',
+                    style: const TextStyle(
+                        fontSize: 12, color: LuminaColors.white60),
                   ),
                   trailing: Text(
-                    model.sizeBytes == null ? '--' : formatBytes(model.sizeBytes!),
+                    model.sizeBytes == null
+                        ? '--'
+                        : formatBytes(model.sizeBytes!),
                     style: const TextStyle(fontWeight: FontWeight.w600),
                   ),
                 ),
@@ -205,7 +219,8 @@ class _EmptyHubCard extends StatelessWidget {
         padding: const EdgeInsets.all(20),
         child: Column(
           children: [
-            Icon(Icons.cloud_download_rounded, size: 40, color: LuminaColors.white60.withValues(alpha: 0.5)),
+            Icon(Icons.cloud_download_rounded,
+                size: 40, color: LuminaColors.white60.withValues(alpha: 0.5)),
             const SizedBox(height: 12),
             const Text(
               'No hub models loaded yet',
@@ -298,21 +313,25 @@ class _HubModelCard extends StatelessWidget {
                 Expanded(
                   child: Text(
                     model.id,
-                    style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14),
+                    style: const TextStyle(
+                        fontWeight: FontWeight.w700, fontSize: 14),
                   ),
                 ),
                 if (active) ...[
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                     decoration: BoxDecoration(
                       color: LuminaColors.emerald.withValues(alpha: 0.15),
                       borderRadius: BorderRadius.circular(999),
-                      border: Border.all(color: LuminaColors.emerald.withValues(alpha: 0.4)),
+                      border: Border.all(
+                          color: LuminaColors.emerald.withValues(alpha: 0.4)),
                     ),
                     child: const Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Icon(Icons.circle, size: 6, color: LuminaColors.emerald),
+                        Icon(Icons.circle,
+                            size: 6, color: LuminaColors.emerald),
                         SizedBox(width: 4),
                         Text(
                           'Active',
@@ -335,11 +354,14 @@ class _HubModelCard extends StatelessWidget {
               spacing: 6,
               runSpacing: 6,
               children: [
-                _InfoChip(icon: Icons.download_rounded, text: '${model.downloads}'),
+                _InfoChip(
+                    icon: Icons.download_rounded, text: '${model.downloads}'),
                 _InfoChip(icon: Icons.favorite_rounded, text: '${model.likes}'),
                 _InfoChip(
                   icon: Icons.storage_rounded,
-                  text: totalSizeBytes == null ? 'size: --' : 'size: ${formatBytes(totalSizeBytes)}',
+                  text: totalSizeBytes == null
+                      ? 'size: --'
+                      : 'size: ${formatBytes(totalSizeBytes)}',
                 ),
                 ...model.tags.take(3).map((t) => _InfoChip(text: t)),
               ],
@@ -348,12 +370,12 @@ class _HubModelCard extends StatelessWidget {
 
             // GGUF files
             if (files.isEmpty)
-              const Text('No GGUF files found.', style: TextStyle(color: LuminaColors.white60))
+              const Text('No GGUF files found.',
+                  style: TextStyle(color: LuminaColors.white60))
             else
               SizedBox(
                 height: shouldScrollFiles ? filesHeight : null,
                 child: Scrollbar(
-                  thumbVisibility: shouldScrollFiles,
                   child: ListView.separated(
                     primary: false,
                     shrinkWrap: true,
@@ -361,32 +383,69 @@ class _HubModelCard extends StatelessWidget {
                         ? const AlwaysScrollableScrollPhysics()
                         : const NeverScrollableScrollPhysics(),
                     itemCount: files.length,
-                    separatorBuilder: (context, index) => const SizedBox(height: 6),
+                    separatorBuilder: (context, index) =>
+                        const SizedBox(height: 6),
                     itemBuilder: (context, index) {
                       final file = files[index];
                       return Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                        decoration: glassDecoration(fillOpacity: 0.03, radius: 10),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 8),
+                        decoration:
+                            glassDecoration(fillOpacity: 0.03, radius: 10),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Row(
                               children: [
-                                const Icon(Icons.description_rounded, size: 16, color: LuminaColors.white60),
+                                const Icon(Icons.description_rounded,
+                                    size: 16, color: LuminaColors.white60),
                                 const SizedBox(width: 8),
                                 Expanded(
                                   child: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
                                     children: [
-                                      Text(
-                                        file.quantization ?? 'GGUF',
-                                        style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+                                      Row(
+                                        children: [
+                                          Text(
+                                            file.isMlx
+                                                ? 'MLX'
+                                                : (file.quantization ?? 'GGUF'),
+                                            style: const TextStyle(
+                                                fontWeight: FontWeight.w600,
+                                                fontSize: 13),
+                                          ),
+                                          if (file.isMlx) ...[
+                                            const SizedBox(width: 6),
+                                            Container(
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                      horizontal: 6,
+                                                      vertical: 2),
+                                              decoration: BoxDecoration(
+                                                color: LuminaColors.accent
+                                                    .withValues(alpha: 0.15),
+                                                borderRadius:
+                                                    BorderRadius.circular(4),
+                                              ),
+                                              child: const Text(
+                                                'Apple Silicon',
+                                                style: TextStyle(
+                                                    fontSize: 9,
+                                                    color:
+                                                        LuminaColors.accentLight),
+                                              ),
+                                            ),
+                                          ],
+                                        ],
                                       ),
                                       Text(
                                         file.filename,
                                         maxLines: 1,
                                         overflow: TextOverflow.ellipsis,
-                                        style: const TextStyle(fontSize: 11, color: LuminaColors.white60),
+                                        style: const TextStyle(
+                                            fontSize: 11,
+                                            color: LuminaColors.white60),
                                       ),
                                     ],
                                   ),
@@ -397,7 +456,9 @@ class _HubModelCard extends StatelessWidget {
                             Row(
                               children: [
                                 Text(
-                                  file.sizeBytes == null ? '--' : formatBytes(file.sizeBytes!),
+                                  file.sizeBytes == null
+                                      ? '--'
+                                      : formatBytes(file.sizeBytes!),
                                   style: TextStyle(
                                     fontSize: 12,
                                     fontWeight: FontWeight.w600,
@@ -410,10 +471,12 @@ class _HubModelCard extends StatelessWidget {
                                   child: FilledButton(
                                     onPressed: () => onDownload(file),
                                     style: FilledButton.styleFrom(
-                                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                                      padding: const EdgeInsets.symmetric(
+                                          horizontal: 12),
                                       textStyle: const TextStyle(fontSize: 12),
                                     ),
-                                    child: const Icon(Icons.download_rounded, size: 16),
+                                    child: const Icon(Icons.download_rounded,
+                                        size: 16),
                                   ),
                                 ),
                               ],
@@ -471,7 +534,9 @@ class _InfoChip extends StatelessWidget {
             Icon(icon, size: 12, color: LuminaColors.white60),
             const SizedBox(width: 4),
           ],
-          Text(text, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600)),
+          Text(text,
+              style:
+                  const TextStyle(fontSize: 11, fontWeight: FontWeight.w600)),
         ],
       ),
     );
