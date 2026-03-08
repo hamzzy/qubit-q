@@ -1,6 +1,6 @@
 # MAI (Mobile AI Runtime)
 
-Production-oriented local LLM runtime for mobile and edge, implemented in Rust with a Flutter client.
+local LLM runtime for mobile and edge, implemented in Rust with a Flutter client.
 
 MAI is designed as an on-device inference platform, not just a UI wrapper. It provides:
 - A Rust runtime with model registry, memory guardrails, and runtime metrics
